@@ -591,15 +591,20 @@ itemForm.addEventListener('submit', async (e) => {
         });
 
         if (!uploadRes.ok) {
-          const err = await uploadRes.json();
-          throw new Error(err.error || 'Image upload failed');
-        }
+                  const errText = await uploadRes.text();
+                  console.error('[UPLOAD] Error response:', uploadRes.status, errText);
+                  let errMsg = 'Image upload failed (HTTP ' + uploadRes.status + ')';
+                  try { const err = JSON.parse(errText); errMsg = err.error || err.details || errMsg; } catch {}
+                  throw new Error(errMsg);
+                }
 
         progressFill.style.width = '80%';
         progressText.textContent = 'Processing...';
 
-        uploadedFileData = await uploadRes.json();
-        imageUrl = uploadedFileData.imageUrl;
+                const uploadData = await uploadRes.json();
+                console.log('[UPLOAD] Success:', uploadData);
+                uploadedFileData = uploadData;
+                imageUrl = uploadedFileData.imageUrl;
       }
     } else if (editId) {
       // Editing without replacing image - keep existing URL
