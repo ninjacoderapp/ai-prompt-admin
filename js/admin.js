@@ -113,6 +113,8 @@ function stripInternal(item) {
   Object.keys(item || {}).forEach(key => {
     if (key.charAt(0) !== '_') copy[key] = item[key];
   });
+  // "prompt2" is not part of the catalog schema and must never be published.
+  delete copy.prompt2;
   if (!Array.isArray(copy.tags)) copy.tags = [];
   return copy;
 }
@@ -405,7 +407,7 @@ function renderItems() {
 
   itemGrid.innerHTML = items.map(item => `
     <div class="item-card ${currentView === 'list' ? 'list-view' : ''}" data-id="${item.id}">
-      <img class="card-image" src="${escapeHtml(item.image)}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
+      <img class="card-image" src="${escapeHtml(resolveImageSrc(item))}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
         onerror="handleImageError(this)" />
       <div class="card-body">
         <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}${pendingBadge(item, baseById)}</div>
@@ -464,7 +466,9 @@ function escapeHtml(str) {
 }
 
 // Derive the repository filename for an item. New items store filePath;
-// older items only have the public URL, so extract the last path segment.
+// older items only have the public URL or a relative path, so extract the
+// last path segment. Plain string parsing keeps this working for every form:
+// "public/images/1.webp", "/images/1.webp" and full URLs all yield "1.webp".
 function getImageFilename(item) {
   if (!item) return null;
   if (item.filePath) {
@@ -472,14 +476,25 @@ function getImageFilename(item) {
     return parts.length ? parts[parts.length - 1] : null;
   }
   if (!item.image) return null;
-  try {
-    const url = new URL(item.image, window.location.origin);
-    const segment = url.pathname.split('/').filter(Boolean).pop() || '';
-    const name = decodeURIComponent(segment);
-    return /\.(webp|jpe?g|png|avif|gif)$/i.test(name) ? name : null;
-  } catch {
-    return null;
-  }
+  const clean = String(item.image).split('?')[0].split('#')[0];
+  const segment = clean.substring(clean.lastIndexOf('/') + 1);
+  let name = segment;
+  try { name = decodeURIComponent(segment); } catch { name = segment; }
+  return /\.(webp|jpe?g|png|avif|gif)$/i.test(name) ? name : null;
+}
+
+// Resolve any catalog image value into a URL this page can actually load.
+// Legacy entries store relative paths such as "public/images/1.webp" while the
+// file itself lives in the repository images/ folder, served at /images/<file>.
+// Without this the browser would request /public/images/1.webp and get nothing.
+function resolveImageSrc(item) {
+  const value = item && item.image ? String(item.image).trim() : '';
+  if (!value) return '';
+  if (/^(data|blob):/i.test(value)) return value;
+  if (value.startsWith('//')) return 'https:' + value;
+  if (/^https?:/i.test(value)) return value;
+  const name = getImageFilename(item);
+  return name ? '/images/' + encodeURIComponent(name) : value;
 }
 
 // Fallback for images the /images/<file> route cannot serve yet (freshly
@@ -646,7 +661,7 @@ function openEditModal(id) {
   formSubmitBtn.disabled = false;
 
   // Show existing image preview
-  previewImage.src = item.image;
+  previewImage.src = resolveImageSrc(item);
   fileInfo.textContent = `Current image (ID: ${item.id})`;
   filePreview.style.display = 'block';
   fileDropContent.style.display = 'none';
@@ -1356,6 +1371,210 @@ $('diagCopyBtn').addEventListener('click', async () => {
   }
 });
 
+// ===== BULK IMAGE IMPORT =====
+// Repairs catalogs whose image files were never uploaded to the repository
+// (legacy "public/images/1.webp" style paths). Every selected file is uploaded
+// with its own filename, then matching items are re-pointed at the new URL.
+const importBtn = $('importBtn');
+const importModal = $('importModal');
+const importClose = $('importClose');
+const importDropZone = $('importDropZone');
+const importFiles = $('importFiles');
+const importList = $('importList');
+const importError = $('importError');
+const importProgress = $('importProgress');
+const importProgressFill = $('importProgressFill');
+const importProgressText = $('importProgressText');
+const importStartBtn = $('importStartBtn');
+const importCancelBtn = $('importCancelBtn');
+
+const IMPORT_TYPES = ['image/webp', 'image/jpeg', 'image/png', 'image/avif'];
+const IMPORT_MAX_SIZE = 20 * 1024 * 1024;
+let importQueue = [];
+let isImporting = false;
+
+function formatBytes(size) {
+  return size > 1024 * 1024
+    ? (size / (1024 * 1024)).toFixed(1) + ' MB'
+    : Math.max(1, Math.round(size / 1024)) + ' KB';
+}
+
+function sameFilename(a, b) {
+  return !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+function itemsUsingFilename(name) {
+  if (!catalog || !Array.isArray(catalog.items)) return 0;
+  return catalog.items.filter(item => sameFilename(getImageFilename(item), name)).length;
+}
+
+importBtn.addEventListener('click', openImportModal);
+
+function openImportModal() {
+  importQueue = [];
+  importFiles.value = '';
+  importList.innerHTML = '';
+  importError.style.display = 'none';
+  importProgress.style.display = 'none';
+  importProgressFill.style.width = '0%';
+  importStartBtn.disabled = true;
+  importStartBtn.textContent = 'Upload & Link';
+  importCancelBtn.disabled = false;
+  isImporting = false;
+  importModal.style.display = 'flex';
+  renderImportList();
+}
+
+function closeImportModal() {
+  if (isImporting) return;
+  importModal.style.display = 'none';
+}
+
+importClose.addEventListener('click', closeImportModal);
+importCancelBtn.addEventListener('click', closeImportModal);
+importModal.addEventListener('click', (e) => {
+  if (e.target === importModal) closeImportModal();
+});
+
+importFiles.addEventListener('change', () => addImportFiles(importFiles.files));
+
+importDropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  importDropZone.classList.add('drag-over');
+});
+importDropZone.addEventListener('dragleave', () => importDropZone.classList.remove('drag-over'));
+importDropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  importDropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) addImportFiles(e.dataTransfer.files);
+});
+
+function addImportFiles(fileList) {
+  const skipped = [];
+  Array.from(fileList || []).forEach(file => {
+    if (!IMPORT_TYPES.includes(file.type)) { skipped.push(file.name); return; }
+    if (file.size > IMPORT_MAX_SIZE) { skipped.push(file.name + ' (too large)'); return; }
+    if (importQueue.some(f => sameFilename(f.name, file.name))) return;
+    importQueue.push(file);
+  });
+  if (skipped.length) showToast('Skipped: ' + skipped.join(', '), 'error');
+  renderImportList();
+}
+
+function renderImportList() {
+  if (!importQueue.length) {
+    importList.innerHTML = '<div class="import-empty">No files selected yet.</div>';
+    importStartBtn.disabled = true;
+    importStartBtn.textContent = 'Upload & Link';
+    return;
+  }
+
+  importList.innerHTML = importQueue.map((file, index) => {
+    const matches = itemsUsingFilename(file.name);
+    return '<div class="import-row">' +
+      '<span class="import-name" title="' + escapeHtml(file.name) + '">' + escapeHtml(file.name) + '</span>' +
+      '<span class="import-size">' + formatBytes(file.size) + '</span>' +
+      '<span class="import-match' + (matches ? ' ok' : '') + '">' +
+        (matches ? 'links ' + matches + ' item' + (matches === 1 ? '' : 's') : 'no matching item') +
+      '</span>' +
+      '<button type="button" class="btn btn-small btn-secondary import-remove" data-index="' + index + '">✕</button>' +
+    '</div>';
+  }).join('');
+
+  importList.querySelectorAll('.import-remove').forEach(btn => {
+    btn.addEventListener('click', () => {
+      importQueue.splice(parseInt(btn.dataset.index, 10), 1);
+      renderImportList();
+    });
+  });
+
+  importStartBtn.disabled = false;
+  importStartBtn.textContent = 'Upload & Link (' + importQueue.length + ')';
+}
+
+importStartBtn.addEventListener('click', runImport);
+
+async function runImport() {
+  if (isImporting || !importQueue.length) return;
+  if (!catalog || !Array.isArray(catalog.items)) {
+    importError.textContent = 'The catalog is still loading. Try again in a moment.';
+    importError.style.display = 'block';
+    return;
+  }
+
+  isImporting = true;
+  importStartBtn.disabled = true;
+  importCancelBtn.disabled = true;
+  importError.style.display = 'none';
+  importProgress.style.display = 'block';
+
+  const files = importQueue.slice();
+  const uploaded = [];
+
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      importProgressText.textContent = 'Uploading ' + (i + 1) + ' of ' + files.length + ' — ' + file.name;
+      importProgressFill.style.width = Math.round((i / files.length) * 100) + '%';
+
+      const formData = new FormData();
+      formData.append('image', file);
+      const res = await fetch('/api/images?as=' + encodeURIComponent(file.name), { method: 'POST', body: formData });
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Upload failed for ' + file.name));
+      uploaded.push(await res.json());
+    }
+
+    importProgressFill.style.width = '100%';
+    importProgressText.textContent = 'Linking catalog items...';
+
+    const byName = new Map();
+    uploaded.forEach(data => {
+      if (data && data.filename) byName.set(String(data.filename).toLowerCase(), data);
+    });
+
+    let linked = 0;
+    const linkedNames = new Set();
+
+    catalog.items.forEach(item => {
+      const name = getImageFilename(item);
+      if (!name) return;
+      const hit = byName.get(name.toLowerCase());
+      if (!hit || !hit.imageUrl) return;
+      if (item.image !== hit.imageUrl) linked++;
+      item.image = hit.imageUrl;
+      if (hit.path) item.filePath = hit.path;
+      linkedNames.add(name.toLowerCase());
+    });
+
+    const unmatched = uploaded
+      .filter(data => data && data.filename && !linkedNames.has(String(data.filename).toLowerCase()))
+      .map(data => data.filename);
+
+    updateStats();
+    populateFilters();
+    renderItems();
+    refreshPendingUI();
+
+    importModal.style.display = 'none';
+    showToast(
+      'Uploaded ' + uploaded.length + ' image' + (uploaded.length === 1 ? '' : 's') +
+      ' and linked ' + linked + ' item' + (linked === 1 ? '' : 's') +
+      '. Press Commit to publish the new links.' +
+      (unmatched.length ? ' Not used by any item: ' + unmatched.join(', ') : ''),
+      unmatched.length ? 'warning' : 'success'
+    );
+  } catch (err) {
+    importError.textContent = err.message;
+    importError.style.display = 'block';
+  } finally {
+    isImporting = false;
+    importStartBtn.disabled = false;
+    importCancelBtn.disabled = false;
+    importProgress.style.display = 'none';
+    importProgressFill.style.width = '0%';
+  }
+}
+
 // ===== MODAL HELPERS =====
 function closeModal(modal) {
   modal.style.display = 'none';
@@ -1401,6 +1620,7 @@ document.addEventListener('keydown', (e) => {
     if (confirmDialog.style.display === 'flex') confirmDialog.style.display = 'none';
     else if (diagModal.style.display === 'flex') diagModal.style.display = 'none';
     else if (pendingModal.style.display === 'flex') pendingModal.style.display = 'none';
+    else if (importModal.style.display === 'flex') closeImportModal();
     else if (categoryModal.style.display === 'flex') closeModal(categoryModal);
     else if (itemModal.style.display === 'flex') closeModal(itemModal);
   }

@@ -49,6 +49,7 @@
           <button id="addBtn" class="btn btn-primary">+ Add New Image</button>
           <button id="manageCategoriesBtn" class="btn btn-secondary">🏷️ Categories</button>
           <button id="migrateLinksBtn" class="btn btn-secondary" title="Rewrite catalog image links to Cloudflare Pages">🔗</button>
+          <button id="importBtn" class="btn btn-secondary" title="Upload missing image files and link them to catalog items">📥</button>
           <button id="diagBtn" class="btn btn-secondary" title="Run GitHub diagnostics">🩺</button>
           <button id="logoutBtn" class="btn btn-danger">🚪 Logout</button>
         </div>
@@ -117,6 +118,44 @@
         <div class="form-actions">
           <button type="button" class="btn btn-secondary" id="pendingCloseBtn">Close</button>
           <button type="button" class="btn btn-primary" id="pendingCommitBtn">Commit All</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bulk Image Import Modal -->
+  <div id="importModal" class="modal-overlay" style="display:none;">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <h2>Import Image Files</h2>
+        <button class="modal-close" id="importClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="import-help">
+          Select the original image files (for example <code>1.webp</code>, <code>2.webp</code>…).
+          Each file is uploaded to the repository <code>images/</code> folder under its own name,
+          then every catalog item that points at that filename is re-linked automatically.
+          Press <strong>Commit</strong> afterwards to publish the new links.
+        </p>
+        <div class="file-drop-zone" id="importDropZone">
+          <input type="file" id="importFiles" accept="image/webp,image/jpeg,image/png,image/avif" multiple class="file-input" />
+          <div class="file-drop-content">
+            <div class="file-icon">📥</div>
+            <p>Drop images here or click to browse</p>
+            <p class="file-hint">WebP, JPEG, PNG, or AVIF — select as many as you need</p>
+          </div>
+        </div>
+        <div id="importList" class="import-list"></div>
+        <div id="importError" class="form-error" style="display:none;"></div>
+        <div id="importProgress" class="upload-progress" style="display:none;">
+          <div class="progress-bar">
+            <div class="progress-fill" id="importProgressFill"></div>
+          </div>
+          <p id="importProgressText">Uploading...</p>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" id="importCancelBtn">Cancel</button>
+          <button type="button" class="btn btn-primary" id="importStartBtn" disabled>Upload &amp; Link</button>
         </div>
       </div>
     </div>

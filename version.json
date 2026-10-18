@@ -1,5 +1,5 @@
 {
-  "version": "2.1.1",
-  "updated": "2026-10-19T00:35:00+05:30",
-  "changes": "Staged editing with a sticky Commit bar (v2.1.0) plus a safety guard: Commit now refuses to publish if any staged image is missing from the upload queue, so a local blob preview URL can never end up in catalog.json."
+  "version": "2.2.0",
+  "updated": "2026-10-19T00:50:00+05:30",
+  "changes": "Image fix: the admin page now resolves legacy paths like public/images/1.webp to /images/<file>, and a new Import tool (header button) uploads the original image files to the repository with their own filenames and re-links every matching catalog item. The server accepts ?as=<name> to preserve filenames, and prompt2 is stripped from the published catalog."
 }

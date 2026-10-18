@@ -1,5 +1,5 @@
 import {
-  ghConfig, ghWriteFile, ghDeleteFile, ghListDir,
+  ghConfig, ghWriteFile, ghDeleteFile, ghGetMeta, ghListDir,
   readCatalog, writeCatalog, repoPathLabel, GithubError,
 } from '../_github.js';
 
@@ -171,11 +171,27 @@ async function handleUpload(request, cfg) {
   const originalName = file.name || 'image';
   const rawExt = originalName.includes('.') ? originalName.split('.').pop().toLowerCase() : 'webp';
   const ext = /^[a-z0-9]{2,5}$/.test(rawExt) ? rawExt : 'webp';
-  // Unique filename so an upload can never overwrite an existing image.
-  const filename = Date.now() + '-' + Math.random().toString(36).substring(2, 8) + '.' + ext;
+
+  // ?as=<name> keeps the original filename. The admin "Import" tool uses it so
+  // legacy entries like "public/images/1.webp" can be re-linked to the file.
+  const requestedName = importFilename(new URL(request.url).searchParams.get('as'));
+  let filename;
+  let existingSha = null;
+  if (requestedName) {
+    filename = requestedName;
+    const meta = await ghGetMeta(cfg, IMAGES_DIR + '/' + filename);
+    if (meta) existingSha = meta.sha;
+  } else {
+    // Unique filename so an upload can never overwrite an existing image.
+    filename = Date.now() + '-' + Math.random().toString(36).substring(2, 8) + '.' + ext;
+  }
   const path = IMAGES_DIR + '/' + filename;
 
-  const result = await ghWriteFile(cfg, path, buffer, 'Add image ' + filename);
+  const result = await ghWriteFile(
+    cfg, path, buffer,
+    (existingSha ? 'Replace image ' : 'Add image ') + filename,
+    existingSha || undefined
+  );
   const origin = new URL(request.url).origin;
 
   return json({
@@ -186,8 +202,27 @@ async function handleUpload(request, cfg) {
     sha: result.sha,
     commit: result.commit,
     size: buffer.length,
+    overwritten: !!existingSha,
     note: 'The image is now in the repository and served from /images/' + filename + '. It can take a few seconds to appear.',
   });
+}
+
+// Keeps a caller-supplied filename inside the images folder and limited to the
+// extensions the rest of the pipeline understands.
+const IMPORT_EXT = ['webp', 'jpg', 'jpeg', 'png', 'avif'];
+
+function importFilename(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const base = raw.replace(/\\/g, '/').split('/').pop()
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^[._]+/, '');
+  const match = base.match(/^(.+)\.([A-Za-z0-9]{2,5})$/);
+  if (!match) return null;
+  const extension = match[2].toLowerCase();
+  if (!IMPORT_EXT.includes(extension)) return null;
+  const stem = match[1].substring(0, 80) || 'image';
+  return stem + '.' + extension;
 }
 
 // ===== JSON ACTIONS (delete / migrate-links) =====

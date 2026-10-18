@@ -1129,3 +1129,83 @@ body.has-pending .toast {
     bottom: 5.25rem;
   }
 }
+
+/* ===== BULK IMAGE IMPORT ===== */
+.import-help {
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+}
+
+.import-help code {
+  background: var(--surface2);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+}
+
+.import-list {
+  margin: 1rem 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.import-empty {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 0.75rem 0;
+}
+
+.import-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: var(--surface2);
+  margin-bottom: 0.4rem;
+  font-size: 0.82rem;
+}
+
+.import-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.import-size {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.import-match {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.import-match.ok {
+  color: var(--success, #22c55e);
+  font-weight: 600;
+}
+
+.import-remove {
+  padding: 0.15rem 0.45rem;
+  line-height: 1;
+}
+
+@media (max-width: 600px) {
+  .import-row {
+    flex-wrap: wrap;
+  }
+
+  .import-name {
+    flex-basis: 100%;
+  }
+}
