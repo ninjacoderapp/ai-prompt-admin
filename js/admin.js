@@ -585,7 +585,7 @@ itemForm.addEventListener('submit', async (e) => {
         const formData = new FormData();
         formData.append('image', imageFile.files[0]);
 
-        const uploadRes = await fetch('/api/images/upload?action=upload', {
+        const uploadRes = await fetch('/api/images/upload', {
           method: 'POST',
           body: formData,
         });

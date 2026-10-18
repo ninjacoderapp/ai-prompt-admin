@@ -10,10 +10,23 @@ export async function onRequest(context) {
   const { request, env } = context;
   const authResult = await checkAuth(request, env);
   if (!authResult.authenticated) return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
-  const url = new URL(request.url);
-  const action = url.searchParams.get('action');
-  if (request.method === 'POST' && action === 'upload') return handleUpload(request, env);
-  if (request.method === 'POST' && action === 'url') return handleGetUrl(request, env);
+  
+  if (request.method !== 'POST') {
+    return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: { 'Content-Type': 'application/json' } });
+  }
+  
+  const contentType = request.headers.get('Content-Type') || '';
+  
+  // If multipart form data, it's an upload
+  if (contentType.includes('multipart/form-data')) {
+    return handleUpload(request, env);
+  }
+  
+  // If JSON, it's a URL request
+  if (contentType.includes('application/json')) {
+    return handleGetUrl(request, env);
+  }
+  
   return new Response(JSON.stringify({ error: 'Method not allowed' }), { status: 405, headers: { 'Content-Type': 'application/json' } });
 }
 
