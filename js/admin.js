@@ -1,11 +1,19 @@
 // ===== STATE =====
+// `catalog` is the working draft: every add, edit, delete and category change
+// is applied here only. `committedCatalog` is the last version saved to
+// GitHub and is used to work out what is still pending. Nothing is written
+// to GitHub until the user presses the sticky Commit button.
 let catalog = null;
+let committedCatalog = null;
 let currentView = 'grid';
 let currentFilterCategory = 'all';
 let currentFilterTag = 'all';
 let searchQuery = '';
-let uploadedFileData = null; // Stores data from a successful upload for retry
 let isSubmitting = false;
+let isCommitting = false;
+let pendingUploads = new Map(); // tempId -> { file, name }
+let pendingDeletes = [];        // [{ id, name, path, filename }]
+let pendingSeq = 0;
 
 // ===== DOM REFS =====
 const $ = (id) => document.getElementById(id);
@@ -69,6 +77,17 @@ const confirmOkBtn = $('confirmOkBtn');
 const confirmCancelBtn = $('confirmCancelBtn');
 const confirmClose = $('confirmClose');
 const toast = $('toast');
+const commitBar = $('commitBar');
+const commitSummary = $('commitSummary');
+const commitDetail = $('commitDetail');
+const commitBtn = $('commitBtn');
+const discardBtn = $('discardBtn');
+const commitDetailsBtn = $('commitDetailsBtn');
+const pendingModal = $('pendingModal');
+const pendingList = $('pendingList');
+const pendingCommitBtn = $('pendingCommitBtn');
+const pendingClose = $('pendingClose');
+const pendingCloseBtn = $('pendingCloseBtn');
 
 // Build a readable error message from an API response (error + details + hint).
 async function apiErrorMessage(res, fallback) {
@@ -87,16 +106,27 @@ async function apiErrorMessage(res, fallback) {
   return message;
 }
 
+// Strip the client-only bookkeeping keys (they all start with "_") so the
+// published catalog keeps exactly the documented item fields.
+function stripInternal(item) {
+  const copy = {};
+  Object.keys(item || {}).forEach(key => {
+    if (key.charAt(0) !== '_') copy[key] = item[key];
+  });
+  if (!Array.isArray(copy.tags)) copy.tags = [];
+  return copy;
+}
+
+function cloneCatalog(value) {
+  return value ? JSON.parse(JSON.stringify(value)) : null;
+}
+
 // Build the exact JSON that gets written to GitHub: only the two top-level
 // keys allowed by the catalog schema, and tags always an array.
 function catalogPayload(cat) {
   return {
     categories: (cat.categories || []).map(c => String(c).trim()).filter(Boolean),
-    items: (cat.items || []).map(item => {
-      const copy = { ...item };
-      if (!Array.isArray(copy.tags)) copy.tags = [];
-      return copy;
-    }),
+    items: (cat.items || []).map(stripInternal),
   };
 }
 
@@ -160,6 +190,9 @@ async function handleLogout() {
   document.cookie = 'admin_session=; Max-Age=0; Path=/; Secure; SameSite=Strict';
   showLogin();
   catalog = null;
+  committedCatalog = null;
+  resetPendingState();
+  refreshPendingUI();
 }
 
 function showLogin() {
@@ -202,6 +235,10 @@ async function loadCatalog() {
         }
 
         catalog = JSON.parse(responseText);
+        if (!Array.isArray(catalog.categories)) catalog.categories = [];
+        if (!Array.isArray(catalog.items)) catalog.items = [];
+        committedCatalog = cloneCatalog(catalog);
+        resetPendingState();
 
         // The catalog endpoint reports when catalog.json was not found so a
         // wrong GITHUB_DATA_PATH is visible instead of a silent empty list.
@@ -219,6 +256,7 @@ async function loadCatalog() {
         populateFilters();
         renderItems();
         await migrateTrendingCategory();
+        refreshPendingUI();
   } catch (err) {
         console.error('[CATALOG] Error:', err);
         storageStatus.textContent = '❌ Disconnected';
@@ -254,27 +292,18 @@ async function migrateTrendingCategory() {
     }),
   };
 
-  try {
-    const res = await fetch('/api/catalog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(catalogPayload(updated)),
-    });
-    if (!res.ok) throw new Error(await apiErrorMessage(res, 'Failed to save catalog'));
-
-    catalog = updated;
-    updateStats();
-    populateFilters();
-    renderItems();
-    showToast(
-      trendingItems.length
-        ? `"trending" is now a tag — ${trendingItems.length} item(s) moved to "${fallback}" and tagged trending.`
-        : '"trending" removed from categories — it is now a tag.',
-      'success'
-    );
-  } catch (err) {
-    showToast('Could not convert the "trending" category: ' + err.message, 'error');
-  }
+  // Staged locally: the user publishes it with the Commit button.
+  catalog = updated;
+  updateStats();
+  populateFilters();
+  renderItems();
+  refreshPendingUI();
+  showToast(
+    trendingItems.length
+      ? `"trending" is now a tag — ${trendingItems.length} item(s) moved to "${fallback}" and tagged trending. Press Commit to publish.`
+      : '"trending" removed from categories — it is now a tag. Press Commit to publish.',
+    'success'
+  );
 }
 
 function updateStats() {
@@ -372,12 +401,14 @@ function renderItems() {
   itemGrid.style.display = 'grid';
   itemGrid.className = `item-grid ${currentView}-view`;
 
+  const baseById = new Map(((committedCatalog && committedCatalog.items) || []).map(i => [i.id, i]));
+
   itemGrid.innerHTML = items.map(item => `
     <div class="item-card ${currentView === 'list' ? 'list-view' : ''}" data-id="${item.id}">
       <img class="card-image" src="${escapeHtml(item.image)}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
         onerror="handleImageError(this)" />
       <div class="card-body">
-        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}</div>
+        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}${pendingBadge(item, baseById)}</div>
         <span class="card-category">${escapeHtml(item.category)}</span>
         <div class="card-tags">
           ${item.tags.map(t => `<span class="card-tag">${escapeHtml(t)}</span>`).join('')}
@@ -404,6 +435,17 @@ function renderItems() {
 function isTrendingItem(item) {
   return Array.isArray(item && item.tags) &&
     item.tags.some(tag => String(tag).trim().toLowerCase() === 'trending');
+}
+
+// Marks cards that differ from the last committed catalog.
+function pendingBadge(item, baseById) {
+  if (!baseById) return '';
+  const before = baseById.get(item.id);
+  if (!before) return '<span class="card-pending">New</span>';
+  if (JSON.stringify(stripInternal(before)) !== JSON.stringify(stripInternal(item))) {
+    return '<span class="card-pending">Edited</span>';
+  }
+  return '';
 }
 
 function truncatePrompt(prompt, maxLen) {
@@ -514,10 +556,27 @@ listViewBtn.addEventListener('click', () => {
 });
 
 // ===== REFRESH =====
-refreshBtn.addEventListener('click', loadCatalog);
+refreshBtn.addEventListener('click', () => {
+  if (hasPendingChanges()) {
+    confirmTitle.textContent = 'Discard pending changes?';
+    confirmMessage.textContent = 'Refreshing reloads the catalog from GitHub and throws away every uncommitted edit and queued upload.';
+    confirmOkBtn.textContent = 'Discard & Refresh';
+    confirmDialog.style.display = 'flex';
+    confirmOkBtn.onclick = () => {
+      confirmDialog.style.display = 'none';
+      loadCatalog();
+    };
+    return;
+  }
+  loadCatalog();
+});
 
 // ===== MIGRATE IMAGE LINKS TO CLOUDFLARE PAGES =====
 $('migrateLinksBtn').addEventListener('click', () => {
+  if (hasPendingChanges()) {
+    showToast('Commit or discard your pending changes first — link conversion rewrites the whole catalog on GitHub.', 'error');
+    return;
+  }
   confirmTitle.textContent = 'Use Cloudflare image links';
   confirmMessage.textContent = 'Rewrite every catalog image URL to its Cloudflare Pages URL? The images must already be committed to the repository images/ folder.';
   confirmOkBtn.textContent = 'Convert';
@@ -552,14 +611,13 @@ addBtn.addEventListener('click', () => openAddModal());
 
 function openAddModal() {
   modalTitle.textContent = 'Add New Image';
-  formSubmitBtn.textContent = 'Upload and Save';
+  formSubmitBtn.textContent = 'Add to Pending Changes';
   editItemId.value = '';
   itemForm.reset();
   filePreview.style.display = 'none';
   fileDropContent.style.display = 'block';
   formError.style.display = 'none';
   uploadProgress.style.display = 'none';
-  uploadedFileData = null;
   isSubmitting = false;
   formSubmitBtn.disabled = false;
   currentTags = [];
@@ -578,11 +636,10 @@ function openEditModal(id) {
   imageFile.value = '';
 
   modalTitle.textContent = 'Edit Image';
-  formSubmitBtn.textContent = 'Save Changes';
+  formSubmitBtn.textContent = 'Update Pending Changes';
   editItemId.value = id;
   itemName.value = item.name;
   itemPrompt.value = item.prompt;
-  uploadedFileData = null;
   formError.style.display = 'none';
   uploadProgress.style.display = 'none';
   isSubmitting = false;
@@ -677,7 +734,6 @@ removeFileBtn.addEventListener('click', () => {
   imageFile.value = '';
   filePreview.style.display = 'none';
   fileDropContent.style.display = 'block';
-  uploadedFileData = null;
 });
 
 // ===== TAGS =====
@@ -753,8 +809,8 @@ function addTagToDisplay(tag) {
   });
 }
 
-// ===== FORM SUBMIT =====
-itemForm.addEventListener('submit', async (e) => {
+// ===== FORM SUBMIT (staged, no network) =====
+itemForm.addEventListener('submit', (e) => {
   e.preventDefault();
   if (isSubmitting) return;
 
@@ -763,140 +819,86 @@ itemForm.addEventListener('submit', async (e) => {
   const prompt = itemPrompt.value.trim();
   const editId = editItemId.value ? parseInt(editItemId.value) : null;
 
-  // Validate
   if (!name) { showFormError('Name is required.'); return; }
   if (!category) { showFormError('Category is required.'); return; }
   if (!prompt) { showFormError('Prompt is required.'); return; }
 
-  isSubmitting = true;
-  formSubmitBtn.disabled = true;
   formError.style.display = 'none';
 
-  try {
-    let imageUrl = null;
+  const existing = editId ? catalog.items.find(i => i.id === editId) : null;
+  const pickedFile = imageFile.files.length > 0 ? imageFile.files[0] : null;
 
-    // Upload image if a new file is selected
-    if (imageFile.files.length > 0) {
-      if (uploadedFileData) {
-        // Reuse previously uploaded file data (retry scenario)
-        imageUrl = uploadedFileData.imageUrl;
-      } else {
-        uploadProgress.style.display = 'block';
-        progressFill.style.width = '30%';
-        progressText.textContent = 'Uploading image...';
-
-        const formData = new FormData();
-        formData.append('image', imageFile.files[0]);
-
-        // Cloudflare Pages maps functions/api/images.js to /api/images.
-        // /api/images/upload does not exist and returns 404.
-        const uploadRes = await fetch('/api/images', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!uploadRes.ok) {
-                  const errMsg = await apiErrorMessage(uploadRes, 'Image upload failed');
-                  throw new Error(errMsg);
-                }
-
-        progressFill.style.width = '80%';
-        progressText.textContent = 'Processing...';
-
-                const uploadData = await uploadRes.json();
-                console.log('[UPLOAD] Success:', uploadData);
-                uploadedFileData = uploadData;
-                imageUrl = uploadedFileData.imageUrl;
-      }
-    } else if (editId) {
-      // Editing without replacing image - keep existing URL
-      const existingItem = catalog.items.find(i => i.id === editId);
-      if (existingItem) {
-        imageUrl = existingItem.image;
-      }
-    } else {
-      showFormError('Please select an image file.');
-      isSubmitting = false;
-      formSubmitBtn.disabled = false;
-      return;
-    }
-
-    if (!imageUrl) {
-      throw new Error('Could not obtain image URL');
-    }
-
-    progressFill.style.width = '90%';
-    progressText.textContent = 'Saving catalog...';
-
-    // The "trending" tag is driven by the checkbox so it can never be duplicated.
-    const finalTags = currentTags.filter(t => String(t).trim().toLowerCase() !== 'trending');
-    if (itemTrending.checked) finalTags.push('trending');
-
-    // Build catalog update
-    let updatedCatalog = JSON.parse(JSON.stringify(catalog));
-
-    if (editId) {
-          // Update existing item - preserve any extra fields the item already has
-      const idx = updatedCatalog.items.findIndex(i => i.id === editId);
-      if (idx === -1) throw new Error('Item not found in catalog');
-
-          const existing = updatedCatalog.items[idx];
-          updatedCatalog.items[idx] = {
-            ...existing,
-            id: editId,
-            name,
-            category,
-            tags: finalTags,
-            image: imageUrl,
-            prompt,
-            dateAdded: existing.dateAdded || new Date().toISOString(),
-            ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
-          };
-        } else {
-      // Add new item
-      const newId = generateNewId(updatedCatalog.items);
-      updatedCatalog.items.push({
-        id: newId,
-        name,
-        category,
-        tags: finalTags,
-        image: imageUrl,
-        prompt,
-        dateAdded: new Date().toISOString(),
-        ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
-      });
-    }
-
-    // Save catalog
-    const saveRes = await fetch('/api/catalog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(catalogPayload(updatedCatalog)),
-    });
-
-    if (!saveRes.ok) {
-      throw new Error(await apiErrorMessage(saveRes, 'Failed to save catalog'));
-    }
-
-    progressFill.style.width = '100%';
-    progressText.textContent = 'Done!';
-
-    // Update local catalog
-    catalog = updatedCatalog;
-    updateStats();
-    populateFilters();
-    renderItems();
-
-    closeModal(itemModal);
-    showToast(editId ? 'Item updated successfully!' : 'Item added successfully!', 'success');
-  } catch (err) {
-    showFormError(err.message);
-    showToast('Error: ' + err.message, 'error');
-  } finally {
-    isSubmitting = false;
-    formSubmitBtn.disabled = false;
-    uploadProgress.style.display = 'none';
+  // A newly picked file is queued and uploaded only when the user commits.
+  // Until then the card previews it from a local blob URL.
+  let imageUrl = null;
+  let pendingImageId = null;
+  if (pickedFile) {
+    if (existing && existing._pendingImageId) pendingUploads.delete(existing._pendingImageId);
+    pendingImageId = 'img-' + (++pendingSeq);
+    pendingUploads.set(pendingImageId, { file: pickedFile, name: pickedFile.name });
+    imageUrl = URL.createObjectURL(pickedFile);
+  } else if (existing) {
+    imageUrl = existing.image;
+  } else {
+    showFormError('Please select an image file.');
+    return;
   }
+
+  if (!imageUrl) { showFormError('Please select an image file.'); return; }
+
+  // The "trending" tag is driven by the checkbox so it can never be duplicated.
+  const finalTags = currentTags.filter(t => String(t).trim().toLowerCase() !== 'trending');
+  if (itemTrending.checked) finalTags.push('trending');
+
+  if (editId) {
+    const idx = catalog.items.findIndex(i => i.id === editId);
+    if (idx === -1) { showFormError('Item not found in catalog'); return; }
+
+    const prev = catalog.items[idx];
+    const next = {
+      ...prev,
+      id: editId,
+      name,
+      category,
+      tags: finalTags,
+      image: imageUrl,
+      prompt,
+      dateAdded: prev.dateAdded || new Date().toISOString(),
+    };
+
+    if (pendingImageId) {
+      delete next.filePath;
+      next._pendingImageId = pendingImageId;
+    } else {
+      if (!prev.filePath) delete next.filePath;
+      if (prev._pendingImageId) next._pendingImageId = prev._pendingImageId;
+    }
+
+    catalog.items[idx] = next;
+  } else {
+    catalog.items.push({
+      id: generateNewId(catalog.items),
+      name,
+      category,
+      tags: finalTags,
+      image: imageUrl,
+      prompt,
+      dateAdded: new Date().toISOString(),
+      ...(pendingImageId ? { _pendingImageId: pendingImageId } : {}),
+    });
+  }
+
+  updateStats();
+  populateFilters();
+  renderItems();
+  refreshPendingUI();
+  closeModal(itemModal);
+  showToast(
+    editId
+      ? 'Changes staged. Press ✓ Commit to publish them.'
+      : 'Image staged. Press ✓ Commit to publish it.',
+    'success'
+  );
 });
 
 function generateNewId(items) {
@@ -909,87 +911,54 @@ function generateNewId(items) {
   return newId;
 }
 
-// ===== DELETE =====
+// ===== DELETE (staged) =====
 function confirmDelete(id) {
   const item = catalog.items.find(i => i.id === id);
   if (!item) return;
 
   confirmTitle.textContent = 'Delete Image';
-  confirmMessage.textContent = `Delete "${item.name}"? This removes the catalog entry and permanently deletes the image file from the repository.`;
-  confirmOkBtn.textContent = 'Delete';
+  confirmMessage.textContent = `Remove "${item.name}" from the draft? The entry disappears now and the image file is deleted from GitHub when you press Commit.`;
+  confirmOkBtn.textContent = 'Remove';
   confirmDialog.style.display = 'flex';
 
-  confirmOkBtn.onclick = async () => {
+  confirmOkBtn.onclick = () => {
     confirmDialog.style.display = 'none';
-    await deleteItem(id);
+    deleteItem(id);
   };
 }
 
-async function deleteItem(id) {
-  const item = catalog.items.find(i => i.id === id);
-  if (!item) return;
+function deleteItem(id) {
+  const idx = catalog.items.findIndex(i => i.id === id);
+  if (idx === -1) return;
 
-  try {
-    // 1. Delete the image file from the repository
-    let fileDeleted = false;
-    let fileError = null;
+  const item = catalog.items[idx];
+
+  if (item._pendingImageId) {
+    // Never uploaded, so there is nothing to delete on GitHub.
+    pendingUploads.delete(item._pendingImageId);
+  } else {
     const filename = getImageFilename(item);
-
     if (item.filePath || filename) {
-      try {
-        const fileRes = await fetch('/api/images', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'delete',
-            path: item.filePath || undefined,
-            filename: filename || undefined,
-          }),
-        });
-        const fileData = await fileRes.json().catch(() => ({}));
-        if (fileRes.ok) {
-          fileDeleted = true;
-        } else {
-          fileError = fileData.error || ('HTTP ' + fileRes.status);
-          if (fileData.details) fileError += ' - ' + fileData.details;
-        }
-      } catch (err) {
-        fileError = err.message;
-      }
+      pendingDeletes.push({
+        id: item.id,
+        name: item.name,
+        path: item.filePath || null,
+        filename: filename || null,
+      });
     }
-
-    // 2. Remove the entry from catalog.json
-    const updatedCatalog = JSON.parse(JSON.stringify(catalog));
-    updatedCatalog.items = updatedCatalog.items.filter(i => i.id !== id);
-
-    const res = await fetch('/api/catalog', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(catalogPayload(updatedCatalog)),
-    });
-
-    if (!res.ok) {
-      throw new Error(await apiErrorMessage(res, 'Failed to save catalog'));
-    }
-
-    catalog = updatedCatalog;
-    updateStats();
-    populateFilters();
-    renderItems();
-
-    if (fileError) {
-      showToast('Removed from catalog, but the image file was NOT deleted: ' + fileError, 'error');
-    } else if (fileDeleted) {
-      showToast('Image deleted from the repository and catalog.', 'success');
-    } else {
-      showToast('Removed from catalog (no image file was linked).', 'success');
-    }
-  } catch (err) {
-    showToast('Error: ' + err.message, 'error');
   }
+
+  catalog.items.splice(idx, 1);
+
+  updateStats();
+  populateFilters();
+  renderItems();
+  renderCategoryList();
+  refreshPendingUI();
+  showToast('Removed from the draft. Press ✓ Commit to publish.', 'success');
 }
 
-// ===== CATEGORY MANAGEMENT =====
+// ===== CATEGORY MANAGEMENT (staged) =====
 manageCategoriesBtn.addEventListener('click', () => {
   renderCategoryList();
   categoryError.style.display = 'none';
@@ -1044,7 +1013,7 @@ addCategoryBtn.addEventListener('click', () => {
   }
 
   catalog.categories.push(name);
-  saveCategoryChange();
+  afterCategoryChange();
   newCategoryName.value = '';
 });
 
@@ -1071,7 +1040,7 @@ function promptRenameCategory(oldName) {
     }
   });
 
-  saveCategoryChange();
+  afterCategoryChange();
 }
 
 function confirmDeleteCategory(cat) {
@@ -1083,31 +1052,258 @@ function confirmDeleteCategory(cat) {
   confirmOkBtn.onclick = async () => {
     confirmDialog.style.display = 'none';
     catalog.categories = catalog.categories.filter(c => c !== cat);
-    await saveCategoryChange();
+    afterCategoryChange();
   };
 }
 
-async function saveCategoryChange() {
+// Category edits stay in the draft; the Commit button publishes them.
+function afterCategoryChange() {
+  updateStats();
+  populateFilters();
+  renderItems();
+  renderCategoryList();
+  refreshPendingUI();
+  showToast('Categories staged. Press ✓ Commit to publish.', 'success');
+}
+
+// ===== PENDING CHANGES / COMMIT =====
+function resetPendingState() {
+  pendingUploads = new Map();
+  pendingDeletes = [];
+}
+
+// Diff the working draft against the last committed catalog.
+function computeChanges() {
+  const result = { added: [], edited: [], deleted: [], categories: false, uploads: [] };
+  if (!catalog) return result;
+
+  const base = committedCatalog || { categories: [], items: [] };
+  const baseById = new Map((base.items || []).map(i => [i.id, i]));
+  const draftById = new Map((catalog.items || []).map(i => [i.id, i]));
+
+  (catalog.items || []).forEach(item => {
+    const before = baseById.get(item.id);
+    if (!before) {
+      result.added.push(item);
+    } else if (JSON.stringify(stripInternal(before)) !== JSON.stringify(stripInternal(item))) {
+      result.edited.push(item);
+    }
+  });
+
+  (base.items || []).forEach(item => {
+    if (!draftById.has(item.id)) result.deleted.push(item);
+  });
+
+  result.categories = JSON.stringify(base.categories || []) !== JSON.stringify(catalog.categories || []);
+  result.uploads = Array.from(pendingUploads.entries()).map(([id, entry]) => ({ id, name: entry.name }));
+  return result;
+}
+
+function hasPendingChanges() {
+  if (!catalog) return false;
+  const c = computeChanges();
+  return c.added.length > 0 || c.edited.length > 0 || c.deleted.length > 0 ||
+    c.categories || pendingUploads.size > 0 || pendingDeletes.length > 0;
+}
+
+function refreshPendingUI() {
+  if (!commitBar) return;
+
+  const changes = computeChanges();
+  const total = changes.added.length + changes.edited.length + changes.deleted.length + (changes.categories ? 1 : 0);
+  const uploads = changes.uploads.length;
+  const visible = total > 0 || uploads > 0 || pendingDeletes.length > 0;
+
+  commitBar.style.display = visible ? 'flex' : 'none';
+  document.body.classList.toggle('has-pending', visible);
+
+  if (!visible) {
+    commitSummary.textContent = 'No pending changes';
+    commitDetail.textContent = '';
+    if (pendingModal.style.display === 'flex') renderPendingList(changes);
+    return;
+  }
+
+  const parts = [];
+  if (changes.added.length) parts.push(changes.added.length + ' new');
+  if (changes.edited.length) parts.push(changes.edited.length + ' edited');
+  if (changes.deleted.length) parts.push(changes.deleted.length + ' deleted');
+  if (changes.categories) parts.push('categories changed');
+  if (uploads) parts.push(uploads + ' image' + (uploads === 1 ? '' : 's') + ' to upload');
+
+  commitSummary.textContent = total + ' pending change' + (total === 1 ? '' : 's');
+  if (total === 0 && pendingDeletes.length) {
+    commitSummary.textContent = pendingDeletes.length + ' image file' + (pendingDeletes.length === 1 ? '' : 's') + ' to delete';
+  }
+  commitDetail.textContent = parts.join(' · ');
+
+  if (pendingModal.style.display === 'flex') renderPendingList(changes);
+}
+
+function renderPendingList(changes) {
+  const rows = [];
+  changes.added.forEach(i => rows.push({ kind: 'add', label: 'New: ' + i.name }));
+  changes.edited.forEach(i => rows.push({ kind: 'edit', label: 'Edited: ' + i.name }));
+  changes.deleted.forEach(i => rows.push({ kind: 'delete', label: 'Deleted: ' + i.name }));
+  if (changes.categories) {
+    rows.push({ kind: 'category', label: 'Categories: ' + ((catalog.categories || []).join(', ') || 'none') });
+  }
+  changes.uploads.forEach(u => rows.push({ kind: 'image', label: 'Upload: ' + u.name }));
+
+  if (!rows.length) {
+    pendingList.innerHTML = '<div class="pending-empty">No pending changes.</div>';
+    return;
+  }
+
+  pendingList.innerHTML = rows.map(r => `
+    <div class="pending-row">
+      <span class="pending-kind ${r.kind}">${r.kind}</span>
+      <span class="pending-label">${escapeHtml(r.label)}</span>
+    </div>
+  `).join('');
+}
+
+function setCommitStatus(text, detail) {
+  commitSummary.textContent = text;
+  commitDetail.textContent = detail || 'Keep this tab open until it finishes';
+}
+
+// Uploads every queued image, deletes removed files, then saves the catalog
+// exactly once. Failures leave the remaining work staged so it can be retried.
+async function commitChanges() {
+  if (isCommitting) return;
+
+  const changes = computeChanges();
+  if (!hasPendingChanges()) {
+    showToast('Nothing to commit.', 'success');
+    return;
+  }
+
+  isCommitting = true;
+  commitBtn.disabled = true;
+  pendingCommitBtn.disabled = true;
+  discardBtn.disabled = true;
+  commitBar.classList.add('busy');
+
+  const failures = [];
+
   try {
-    const res = await fetch('/api/catalog', {
+    const queue = Array.from(pendingUploads.entries());
+    for (let i = 0; i < queue.length; i++) {
+      const [tempId, entry] = queue[i];
+      setCommitStatus('Uploading image ' + (i + 1) + ' of ' + queue.length + '...', entry.name);
+
+      const formData = new FormData();
+      formData.append('image', entry.file);
+      const res = await fetch('/api/images', { method: 'POST', body: formData });
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Image upload failed'));
+
+      const data = await res.json();
+      catalog.items.forEach(item => {
+        if (item._pendingImageId !== tempId) return;
+        if (data.imageUrl) item.image = data.imageUrl;
+        if (data.path) item.filePath = data.path;
+        delete item._pendingImageId;
+      });
+      pendingUploads.delete(tempId);
+    }
+
+    for (const del of [...pendingDeletes]) {
+      setCommitStatus('Deleting image file...', del.name);
+      try {
+        const res = await fetch('/api/images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'delete',
+            path: del.path || undefined,
+            filename: del.filename || undefined,
+          }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          failures.push(del.name + ': ' + (data.error || 'HTTP ' + res.status));
+        }
+      } catch (err) {
+        failures.push(del.name + ': ' + err.message);
+      }
+      pendingDeletes = pendingDeletes.filter(d => d !== del);
+    }
+
+    // Never publish a local blob: preview URL.
+    const stranded = catalog.items.filter(i => i._pendingImageId);
+    if (stranded.length) {
+      throw new Error(stranded.length + ' staged image(s) are not queued for upload. Re-open those items and pick the image again.');
+    }
+
+    setCommitStatus('Saving catalog...', 'One commit with all your changes');
+    const saveRes = await fetch('/api/catalog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(catalogPayload(catalog)),
     });
+    if (!saveRes.ok) throw new Error(await apiErrorMessage(saveRes, 'Failed to save catalog'));
 
-    if (!res.ok) {
-      throw new Error(await apiErrorMessage(res, 'Failed to save'));
-    }
+    committedCatalog = cloneCatalog(catalog);
+    storageStatus.textContent = '✅ GitHub connected';
+    lastSync.textContent = '\uD83D\uDCC5 ' + new Date().toLocaleString();
 
     updateStats();
     populateFilters();
     renderItems();
-    renderCategoryList();
-    showToast('Categories updated!', 'success');
+
+    const saved = changes.added.length + changes.edited.length + changes.deleted.length + (changes.categories ? 1 : 0);
+    showToast(
+      'Committed ' + saved + ' change' + (saved === 1 ? '' : 's') + ' to GitHub.' +
+      (failures.length ? ' ' + failures.length + ' image file(s) could not be deleted.' : ''),
+      failures.length ? 'warning' : 'success'
+    );
   } catch (err) {
-    showToast('Error: ' + err.message, 'error');
+    showToast('Commit failed: ' + err.message + ' — your changes are still pending.', 'error');
+  } finally {
+    isCommitting = false;
+    commitBtn.disabled = false;
+    pendingCommitBtn.disabled = false;
+    discardBtn.disabled = false;
+    commitBar.classList.remove('busy');
+    refreshPendingUI();
   }
 }
+
+function discardChanges() {
+  confirmTitle.textContent = 'Discard pending changes';
+  confirmMessage.textContent = 'Every uncommitted edit and queued upload will be thrown away and the catalog will be reloaded from GitHub.';
+  confirmOkBtn.textContent = 'Discard';
+  confirmDialog.style.display = 'flex';
+
+  confirmOkBtn.onclick = () => {
+    confirmDialog.style.display = 'none';
+    resetPendingState();
+    loadCatalog();
+  };
+}
+
+commitBtn.addEventListener('click', commitChanges);
+pendingCommitBtn.addEventListener('click', () => {
+  pendingModal.style.display = 'none';
+  commitChanges();
+});
+discardBtn.addEventListener('click', discardChanges);
+commitDetailsBtn.addEventListener('click', () => {
+  renderPendingList(computeChanges());
+  pendingModal.style.display = 'flex';
+});
+pendingClose.addEventListener('click', () => pendingModal.style.display = 'none');
+pendingCloseBtn.addEventListener('click', () => pendingModal.style.display = 'none');
+pendingModal.addEventListener('click', (e) => {
+  if (e.target === pendingModal) pendingModal.style.display = 'none';
+});
+
+window.addEventListener('beforeunload', (e) => {
+  if (!hasPendingChanges()) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
 
 // ===== DIAGNOSTICS =====
 const diagModal = $('diagModal');
@@ -1204,6 +1400,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (confirmDialog.style.display === 'flex') confirmDialog.style.display = 'none';
     else if (diagModal.style.display === 'flex') diagModal.style.display = 'none';
+    else if (pendingModal.style.display === 'flex') pendingModal.style.display = 'none';
     else if (categoryModal.style.display === 'flex') closeModal(categoryModal);
     else if (itemModal.style.display === 'flex') closeModal(itemModal);
   }

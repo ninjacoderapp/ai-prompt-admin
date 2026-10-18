@@ -89,6 +89,39 @@
     </main>
   </div>
 
+  <!-- Sticky commit bar: all edits stay local until this is pressed -->
+  <div id="commitBar" class="commit-bar" style="display:none;">
+    <div class="commit-info">
+      <span class="commit-dot"></span>
+      <div class="commit-text">
+        <div id="commitSummary" class="commit-summary">Unsaved changes</div>
+        <div id="commitDetail" class="commit-detail"></div>
+      </div>
+    </div>
+    <div class="commit-actions">
+      <button type="button" id="commitDetailsBtn" class="btn btn-small btn-secondary" title="Show pending changes">📋</button>
+      <button type="button" id="discardBtn" class="btn btn-small btn-secondary">Discard</button>
+      <button type="button" id="commitBtn" class="btn btn-small btn-primary">✓ Commit</button>
+    </div>
+  </div>
+
+  <!-- Pending Changes Modal -->
+  <div id="pendingModal" class="modal-overlay" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Pending Changes</h2>
+        <button class="modal-close" id="pendingClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="pendingList" class="pending-list"></div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-secondary" id="pendingCloseBtn">Close</button>
+          <button type="button" class="btn btn-primary" id="pendingCommitBtn">Commit All</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Add/Edit Modal -->
   <div id="itemModal" class="modal-overlay" style="display:none;">
     <div class="modal-content modal-lg">
@@ -163,7 +196,7 @@
 
         <div class="form-actions">
           <button type="button" class="btn btn-secondary" id="formCancelBtn">Cancel</button>
-          <button type="submit" id="formSubmitBtn" class="btn btn-primary">Upload and Save</button>
+          <button type="submit" id="formSubmitBtn" class="btn btn-primary">Add to Pending Changes</button>
         </div>
       </form>
     </div>
