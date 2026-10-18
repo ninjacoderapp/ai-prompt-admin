@@ -1,5 +1,5 @@
 {
-  "version": "1.0.3",
-  "updated": "2026-10-18T22:20:00+05:30",
-  "changes": "Fixed upload route (/api/images instead of /api/images/upload), added real Dropbox file deletion, added /api/images image proxy fallback, added /api/images diagnostics report, normalized Dropbox paths, and exposed the catalog path when catalog.json is missing."
+  "version": "2.0.1",
+  "updated": "2026-10-18T23:45:00+05:30",
+  "changes": "Added the /images/<file> route (functions/images/[file].js) so images stored in the GitHub repository are served through the Pages domain with edge caching - required because the site is deployed by direct upload. The mobile app now loads the catalog from /api/public-catalog first and images from /images/<file>. Updated image cache headers and the upload success message."
 }

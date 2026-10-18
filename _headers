@@ -1,0 +1,23 @@
+# Never serve stale admin code from the CDN cache.
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
+/js/*
+  Cache-Control: no-cache
+
+/css/*
+  Cache-Control: no-cache
+
+/version.json
+  Cache-Control: no-cache
+
+# Images get a unique filename on every upload, so they can be cached for a while.
+/images/*
+  Cache-Control: public, max-age=604800
+
+# The mobile app revalidates the catalog on every start.
+/catalog.json
+  Cache-Control: no-cache

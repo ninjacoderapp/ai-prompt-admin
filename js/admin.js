@@ -27,7 +27,7 @@ const listViewBtn = $('listViewBtn');
 const itemGrid = $('itemGrid');
 const loadingIndicator = $('loadingIndicator');
 const emptyState = $('emptyState');
-const dropboxStatus = $('dropboxStatus');
+const storageStatus = $('storageStatus');
 const lastSync = $('lastSync');
 const itemCount = $('itemCount');
 const categoryCount = $('categoryCount');
@@ -46,6 +46,7 @@ const removeFileBtn = $('removeFileBtn');
 const itemName = $('itemName');
 const itemCategory = $('itemCategory');
 const itemTags = $('itemTags');
+const itemTrending = $('itemTrending');
 const tagsDisplay = $('tagsDisplay');
 const tagSuggestions = $('tagSuggestions');
 const itemPrompt = $('itemPrompt');
@@ -68,6 +69,36 @@ const confirmOkBtn = $('confirmOkBtn');
 const confirmCancelBtn = $('confirmCancelBtn');
 const confirmClose = $('confirmClose');
 const toast = $('toast');
+
+// Build a readable error message from an API response (error + details + hint).
+async function apiErrorMessage(res, fallback) {
+  let text = '';
+  try { text = await res.text(); } catch { }
+  let message = fallback + ' (HTTP ' + res.status + ')';
+  try {
+    const body = JSON.parse(text);
+    if (body.error) message = body.error;
+    if (body.details) message += ' — ' + body.details;
+    if (body.hint) message += ' — ' + body.hint;
+  } catch {
+    if (text) message += ': ' + text.substring(0, 200);
+  }
+  console.error('[API] ' + fallback + ' failed:', res.status, text.substring(0, 1000));
+  return message;
+}
+
+// Build the exact JSON that gets written to GitHub: only the two top-level
+// keys allowed by the catalog schema, and tags always an array.
+function catalogPayload(cat) {
+  return {
+    categories: (cat.categories || []).map(c => String(c).trim()).filter(Boolean),
+    items: (cat.items || []).map(item => {
+      const copy = { ...item };
+      if (!Array.isArray(copy.tags)) copy.tags = [];
+      return copy;
+    }),
+  };
+}
 
 // ===== AUTH =====
 async function checkAuth() {
@@ -149,7 +180,7 @@ async function loadCatalog() {
   loadingIndicator.style.display = 'flex';
   itemGrid.style.display = 'none';
   emptyState.style.display = 'none';
-  dropboxStatus.textContent = '⏳ Loading...';
+  storageStatus.textContent = '⏳ Loading...';
 
   try {
         console.log('[CATALOG] Fetching catalog...');
@@ -173,27 +204,76 @@ async function loadCatalog() {
         catalog = JSON.parse(responseText);
 
         // The catalog endpoint reports when catalog.json was not found so a
-        // wrong DROPBOX_SUBFOLDER is visible instead of a silent empty list.
+        // wrong GITHUB_DATA_PATH is visible instead of a silent empty list.
         const catalogStatus = res.headers.get('X-Catalog-Status');
         const catalogPath = res.headers.get('X-Catalog-Path');
         if (catalogStatus === 'not-found') {
-          dropboxStatus.textContent = '⚠️ No catalog.json at ' + (catalogPath || 'configured path');
-          showToast('catalog.json not found at ' + (catalogPath || 'the configured path') + '. Check DROPBOX_SUBFOLDER.', 'error');
+          storageStatus.textContent = '⚠️ No catalog.json at ' + (catalogPath || 'configured path');
+          showToast('catalog.json not found at ' + (catalogPath || 'the configured path') + '. It will be created on the first save.', 'error');
         } else {
-          dropboxStatus.textContent = '✅ Connected';
+          storageStatus.textContent = '✅ GitHub connected';
         }
 
         lastSync.textContent = '\uD83D\uDCC5 ' + new Date().toLocaleString();
         updateStats();
         populateFilters();
         renderItems();
+        await migrateTrendingCategory();
   } catch (err) {
         console.error('[CATALOG] Error:', err);
-        dropboxStatus.textContent = '❌ Disconnected';
+        storageStatus.textContent = '❌ Disconnected';
         showToast('Failed to load catalog: ' + err.message, 'error');
         loadingIndicator.style.display = 'none';
         itemGrid.style.display = 'block';
         itemGrid.innerHTML = '<div class="empty-state"><p>Failed to load catalog.<br/>Error: ' + escapeHtml(err.message) + '</p></div>';
+  }
+}
+
+// "trending" used to be a category; it is now a tag so an item can be both
+// trending and belong to boy/girl/festival/other. Convert old data once.
+async function migrateTrendingCategory() {
+  if (!catalog || !Array.isArray(catalog.items)) return;
+
+  const categories = Array.isArray(catalog.categories) ? catalog.categories : [];
+  const isTrending = (value) => String(value || '').trim().toLowerCase() === 'trending';
+  const hasTrendingCategory = categories.some(isTrending);
+  const trendingItems = catalog.items.filter(item => isTrending(item.category));
+
+  if (!hasTrendingCategory && trendingItems.length === 0) return;
+
+  const remaining = categories.filter(c => !isTrending(c));
+  const fallback = remaining.find(c => String(c).toLowerCase() === 'other') || remaining[0] || 'other';
+
+  const updated = {
+    categories: remaining.length ? remaining : ['other'],
+    items: catalog.items.map(item => {
+      const tags = Array.isArray(item.tags) ? [...item.tags] : [];
+      if (!isTrending(item.category)) return { ...item, tags };
+      if (!tags.some(isTrending)) tags.push('trending');
+      return { ...item, category: fallback, tags };
+    }),
+  };
+
+  try {
+    const res = await fetch('/api/catalog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(catalogPayload(updated)),
+    });
+    if (!res.ok) throw new Error(await apiErrorMessage(res, 'Failed to save catalog'));
+
+    catalog = updated;
+    updateStats();
+    populateFilters();
+    renderItems();
+    showToast(
+      trendingItems.length
+        ? `"trending" is now a tag — ${trendingItems.length} item(s) moved to "${fallback}" and tagged trending.`
+        : '"trending" removed from categories — it is now a tag.',
+      'success'
+    );
+  } catch (err) {
+    showToast('Could not convert the "trending" category: ' + err.message, 'error');
   }
 }
 
@@ -207,7 +287,8 @@ function populateFilters() {
   if (!catalog) return;
 
   // Category filter
-  const currentCat = filterCategory.value;
+  const currentCat = catalog.categories.includes(currentFilterCategory) ? currentFilterCategory : 'all';
+  currentFilterCategory = currentCat;
   filterCategory.innerHTML = '<option value="all">All Categories</option>';
   catalog.categories.forEach(cat => {
     const opt = document.createElement('option');
@@ -218,9 +299,10 @@ function populateFilters() {
   filterCategory.value = currentCat;
 
   // Tag filter
-  const currentTag = filterTag.value;
-  filterTag.innerHTML = '<option value="all">All Tags</option>';
   const allTags = getAllTags();
+  const currentTag = allTags.includes(currentFilterTag) ? currentFilterTag : 'all';
+  currentFilterTag = currentTag;
+  filterTag.innerHTML = '<option value="all">All Tags</option>';
   allTags.forEach(tag => {
     const opt = document.createElement('option');
     opt.value = tag;
@@ -268,6 +350,14 @@ function renderItems() {
     );
   }
 
+  // Newest first: dateAdded when known, otherwise fall back to the numeric id.
+  items = [...items].sort((a, b) => {
+    const ta = Date.parse(a.dateAdded) || 0;
+    const tb = Date.parse(b.dateAdded) || 0;
+    if (ta !== tb) return tb - ta;
+    return (Number(b.id) || 0) - (Number(a.id) || 0);
+  });
+
   if (items.length === 0) {
     itemGrid.style.display = 'none';
     emptyState.style.display = 'block';
@@ -287,7 +377,7 @@ function renderItems() {
       <img class="card-image" src="${escapeHtml(item.image)}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
         onerror="handleImageError(this)" />
       <div class="card-body">
-        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
+        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}</div>
         <span class="card-category">${escapeHtml(item.category)}</span>
         <div class="card-tags">
           ${item.tags.map(t => `<span class="card-tag">${escapeHtml(t)}</span>`).join('')}
@@ -311,6 +401,11 @@ function renderItems() {
   });
 }
 
+function isTrendingItem(item) {
+  return Array.isArray(item && item.tags) &&
+    item.tags.some(tag => String(tag).trim().toLowerCase() === 'trending');
+}
+
 function truncatePrompt(prompt, maxLen) {
   if (!prompt) return '';
   // Remove extra whitespace/newlines for preview
@@ -326,7 +421,7 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// Derive the Dropbox filename for an item. New items store filePath;
+// Derive the repository filename for an item. New items store filePath;
 // older items only have the public URL, so extract the last path segment.
 function getImageFilename(item) {
   if (!item) return null;
@@ -345,15 +440,14 @@ function getImageFilename(item) {
   }
 }
 
-// Worker-proxied URL - works even when Dropbox hotlinking is blocked.
+// Fallback for images the /images/<file> route cannot serve yet (freshly
+// uploaded ones): the Function streams them straight from GitHub raw.
 function getImageProxyUrl(item) {
   if (!item) return null;
-  if (item.filePath) return '/api/images?path=' + encodeURIComponent(item.filePath);
   const filename = getImageFilename(item);
-  return filename ? '/api/images?filename=' + encodeURIComponent(filename) : null;
+  return filename ? '/api/images?file=' + encodeURIComponent(filename) : null;
 }
 
-// First retry through the proxy, then show a placeholder.
 function handleImageError(img) {
   const proxy = img.dataset.proxy;
   if (proxy) {
@@ -387,8 +481,22 @@ filterCategory.addEventListener('change', () => {
 
 filterTag.addEventListener('change', () => {
   currentFilterTag = filterTag.value;
+  const tBtn = $('trendingFilterBtn');
+  if (tBtn) tBtn.classList.toggle('active', currentFilterTag === 'trending');
   renderItems();
 });
+
+// Quick shortcut for the tag-driven "trending" view.
+const trendingFilterBtn = $('trendingFilterBtn');
+if (trendingFilterBtn) {
+  trendingFilterBtn.addEventListener('click', () => {
+    const alreadyOn = currentFilterTag === 'trending';
+    currentFilterTag = alreadyOn ? 'all' : 'trending';
+    filterTag.value = currentFilterTag;
+    trendingFilterBtn.classList.toggle('active', !alreadyOn);
+    renderItems();
+  });
+}
 
 // ===== VIEW TOGGLE =====
 gridViewBtn.addEventListener('click', () => {
@@ -408,6 +516,37 @@ listViewBtn.addEventListener('click', () => {
 // ===== REFRESH =====
 refreshBtn.addEventListener('click', loadCatalog);
 
+// ===== MIGRATE IMAGE LINKS TO CLOUDFLARE PAGES =====
+$('migrateLinksBtn').addEventListener('click', () => {
+  confirmTitle.textContent = 'Use Cloudflare image links';
+  confirmMessage.textContent = 'Rewrite every catalog image URL to its Cloudflare Pages URL? The images must already be committed to the repository images/ folder.';
+  confirmOkBtn.textContent = 'Convert';
+  confirmDialog.style.display = 'flex';
+
+  confirmOkBtn.onclick = async () => {
+    confirmDialog.style.display = 'none';
+    try {
+      const res = await fetch('/api/images', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'migrate-links' }),
+      });
+      if (!res.ok) throw new Error(await apiErrorMessage(res, 'Link conversion failed'));
+      const data = await res.json();
+      console.log('[MIGRATE] result:', data);
+
+      const parts = [`${data.updated || 0} updated`, `${data.alreadyDirect || 0} already on Pages`];
+      const failedCount = (data.failed || []).length;
+      if (failedCount) parts.push(`${failedCount} failed`);
+      showToast(parts.join(' · ') + (data.hint ? ' — ' + data.hint : ''), failedCount ? 'error' : 'success');
+
+      if (data.updated) loadCatalog();
+    } catch (err) {
+      showToast(err.message, 'error');
+    }
+  };
+});
+
 // ===== ADD NEW IMAGE =====
 addBtn.addEventListener('click', () => openAddModal());
 
@@ -425,13 +564,18 @@ function openAddModal() {
   formSubmitBtn.disabled = false;
   currentTags = [];
     tagsDisplay.innerHTML = '';
+    itemTrending.checked = false;
     populateCategorySelect();
     itemModal.style.display = 'flex';
   }
 
-  function openEditModal(id) {
+function openEditModal(id) {
   const item = catalog.items.find(i => i.id === id);
   if (!item) return;
+
+  // Reset the form first so a file picked earlier in the Add modal does not leak in.
+  itemForm.reset();
+  imageFile.value = '';
 
   modalTitle.textContent = 'Edit Image';
   formSubmitBtn.textContent = 'Save Changes';
@@ -457,6 +601,8 @@ function openAddModal() {
     currentTags = [];
     tagsDisplay.innerHTML = '';
     item.tags.forEach(tag => addTagToDisplay(tag));
+
+    itemTrending.checked = isTrendingItem(item);
 
     itemModal.style.display = 'flex';
 }
@@ -593,6 +739,7 @@ function addTagFromInput() {
 function addTagToDisplay(tag) {
   if (currentTags.includes(tag)) return;
   currentTags.push(tag);
+  if (String(tag).trim().toLowerCase() === 'trending') itemTrending.checked = true;
 
   const el = document.createElement('span');
   el.className = 'tag-item';
@@ -601,6 +748,7 @@ function addTagToDisplay(tag) {
 
   el.querySelector('.tag-remove').addEventListener('click', () => {
     currentTags = currentTags.filter(t => t !== tag);
+    if (String(tag).trim().toLowerCase() === 'trending') itemTrending.checked = false;
     el.remove();
   });
 }
@@ -648,10 +796,7 @@ itemForm.addEventListener('submit', async (e) => {
         });
 
         if (!uploadRes.ok) {
-                  const errText = await uploadRes.text();
-                  console.error('[UPLOAD] Error response:', uploadRes.status, errText);
-                  let errMsg = 'Image upload failed (HTTP ' + uploadRes.status + ')';
-                  try { const err = JSON.parse(errText); errMsg = err.error || err.details || errMsg; } catch {}
+                  const errMsg = await apiErrorMessage(uploadRes, 'Image upload failed');
                   throw new Error(errMsg);
                 }
 
@@ -683,11 +828,15 @@ itemForm.addEventListener('submit', async (e) => {
     progressFill.style.width = '90%';
     progressText.textContent = 'Saving catalog...';
 
+    // The "trending" tag is driven by the checkbox so it can never be duplicated.
+    const finalTags = currentTags.filter(t => String(t).trim().toLowerCase() !== 'trending');
+    if (itemTrending.checked) finalTags.push('trending');
+
     // Build catalog update
     let updatedCatalog = JSON.parse(JSON.stringify(catalog));
 
     if (editId) {
-          // Update existing item - preserve any extra fields (e.g., prompt2)
+          // Update existing item - preserve any extra fields the item already has
       const idx = updatedCatalog.items.findIndex(i => i.id === editId);
       if (idx === -1) throw new Error('Item not found in catalog');
 
@@ -697,9 +846,10 @@ itemForm.addEventListener('submit', async (e) => {
             id: editId,
             name,
             category,
-            tags: [...currentTags],
+            tags: finalTags,
             image: imageUrl,
             prompt,
+            dateAdded: existing.dateAdded || new Date().toISOString(),
             ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
           };
         } else {
@@ -709,9 +859,10 @@ itemForm.addEventListener('submit', async (e) => {
         id: newId,
         name,
         category,
-        tags: [...currentTags],
+        tags: finalTags,
         image: imageUrl,
         prompt,
+        dateAdded: new Date().toISOString(),
         ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
       });
     }
@@ -720,12 +871,11 @@ itemForm.addEventListener('submit', async (e) => {
     const saveRes = await fetch('/api/catalog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedCatalog),
+      body: JSON.stringify(catalogPayload(updatedCatalog)),
     });
 
     if (!saveRes.ok) {
-      const err = await saveRes.json();
-      throw new Error(err.error || 'Failed to save catalog');
+      throw new Error(await apiErrorMessage(saveRes, 'Failed to save catalog'));
     }
 
     progressFill.style.width = '100%';
@@ -765,7 +915,7 @@ function confirmDelete(id) {
   if (!item) return;
 
   confirmTitle.textContent = 'Delete Image';
-  confirmMessage.textContent = `Delete "${item.name}"? This removes the catalog entry and permanently deletes the image file from Dropbox.`;
+  confirmMessage.textContent = `Delete "${item.name}"? This removes the catalog entry and permanently deletes the image file from the repository.`;
   confirmOkBtn.textContent = 'Delete';
   confirmDialog.style.display = 'flex';
 
@@ -780,7 +930,7 @@ async function deleteItem(id) {
   if (!item) return;
 
   try {
-    // 1. Delete the image file from Dropbox
+    // 1. Delete the image file from the repository
     let fileDeleted = false;
     let fileError = null;
     const filename = getImageFilename(item);
@@ -815,12 +965,11 @@ async function deleteItem(id) {
     const res = await fetch('/api/catalog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedCatalog),
+      body: JSON.stringify(catalogPayload(updatedCatalog)),
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to save catalog');
+      throw new Error(await apiErrorMessage(res, 'Failed to save catalog'));
     }
 
     catalog = updatedCatalog;
@@ -829,9 +978,9 @@ async function deleteItem(id) {
     renderItems();
 
     if (fileError) {
-      showToast('Removed from catalog, but the Dropbox file was NOT deleted: ' + fileError, 'error');
+      showToast('Removed from catalog, but the image file was NOT deleted: ' + fileError, 'error');
     } else if (fileDeleted) {
-      showToast('Image deleted from Dropbox and catalog.', 'success');
+      showToast('Image deleted from the repository and catalog.', 'success');
     } else {
       showToast('Removed from catalog (no image file was linked).', 'success');
     }
@@ -881,6 +1030,12 @@ function renderCategoryList() {
 addCategoryBtn.addEventListener('click', () => {
   const name = newCategoryName.value.trim();
   if (!name) return;
+
+  if (name.toLowerCase() === 'trending') {
+    categoryError.textContent = '"trending" is a tag, not a category. Use the ⭐ Trending checkbox when editing an item.';
+    categoryError.style.display = 'block';
+    return;
+  }
 
   if (catalog.categories.some(c => c.toLowerCase() === name.toLowerCase())) {
     categoryError.textContent = 'Category already exists.';
@@ -937,12 +1092,11 @@ async function saveCategoryChange() {
     const res = await fetch('/api/catalog', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(catalog),
+      body: JSON.stringify(catalogPayload(catalog)),
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to save');
+      throw new Error(await apiErrorMessage(res, 'Failed to save'));
     }
 
     updateStats();
@@ -954,6 +1108,57 @@ async function saveCategoryChange() {
     showToast('Error: ' + err.message, 'error');
   }
 }
+
+// ===== DIAGNOSTICS =====
+const diagModal = $('diagModal');
+const diagOutput = $('diagOutput');
+const diagSummary = $('diagSummary');
+
+$('diagBtn').addEventListener('click', async () => {
+  diagSummary.textContent = 'Running checks...';
+  diagOutput.textContent = '';
+  diagModal.style.display = 'flex';
+  try {
+    const res = await fetch('/api/catalog?diagnostics=1', { cache: 'no-store' });
+    const text = await res.text();
+    let report;
+    try { report = JSON.parse(text); } catch { report = { raw: text.substring(0, 2000) }; }
+    diagOutput.textContent = JSON.stringify(report, null, 2);
+
+    const problems = [];
+    if (!report.secretPresent) problems.push('GITHUB_SECRET is not set');
+    if (report.token && report.token.ok === false) problems.push('Token error: ' + report.token.error);
+    if (report.repoAccess && report.repoAccess.ok === false) {
+      problems.push('Cannot access ' + report.owner + '/' + report.repo + ': ' + (report.repoAccess.error || 'unknown'));
+    }
+    if (report.read && report.read.ok === false) problems.push('Cannot read catalog: ' + (report.read.error || 'unknown'));
+    if (report.write && report.write.ok === false) {
+      problems.push('Cannot WRITE to GitHub: ' + (report.write.error || 'no push permission') + (report.write.hint ? ' — ' + report.write.hint : ''));
+    }
+    if (report.catalog && report.catalog.ok === false) problems.push('Catalog problem: ' + (report.catalog.error || 'unknown'));
+    if (!res.ok) problems.unshift('Diagnostics endpoint returned HTTP ' + res.status);
+
+    diagSummary.textContent = problems.length
+      ? '⚠️ ' + problems.join(' • ')
+      : '✅ Everything looks good: token, repo access, read and write checks passed.';
+  } catch (err) {
+    diagSummary.textContent = '❌ ' + err.message;
+  }
+});
+
+$('diagClose').addEventListener('click', () => diagModal.style.display = 'none');
+$('diagCloseBtn').addEventListener('click', () => diagModal.style.display = 'none');
+diagModal.addEventListener('click', (e) => {
+  if (e.target === diagModal) diagModal.style.display = 'none';
+});
+$('diagCopyBtn').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(diagOutput.textContent);
+    showToast('Diagnostics copied to clipboard', 'success');
+  } catch {
+    showToast('Copy failed — select the text manually', 'error');
+  }
+});
 
 // ===== MODAL HELPERS =====
 function closeModal(modal) {
@@ -986,7 +1191,7 @@ function showToast(message, type = 'success') {
   clearTimeout(toast._timeout);
   toast._timeout = setTimeout(() => {
     toast.style.display = 'none';
-  }, 4000);
+  }, type === 'error' ? 10000 : 4000);
 }
 
 function showFormError(message) {
@@ -998,6 +1203,7 @@ function showFormError(message) {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (confirmDialog.style.display === 'flex') confirmDialog.style.display = 'none';
+    else if (diagModal.style.display === 'flex') diagModal.style.display = 'none';
     else if (categoryModal.style.display === 'flex') closeModal(categoryModal);
     else if (itemModal.style.display === 'flex') closeModal(itemModal);
   }
@@ -1007,7 +1213,17 @@ document.addEventListener('keydown', (e) => {
 loginForm.addEventListener('submit', handleLogin);
 logoutBtn.addEventListener('click', handleLogout);
 
+async function showVersion() {
+  try {
+    const res = await fetch('/version.json', { cache: 'no-store' });
+    const data = await res.json();
+    const badge = $('appVersion');
+    if (badge && data.version) badge.textContent = 'v' + data.version;
+  } catch { }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+  showVersion();
   const authed = await checkAuth();
   if (authed) {
     loadCatalog();

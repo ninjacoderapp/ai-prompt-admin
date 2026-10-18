@@ -412,6 +412,40 @@ body {
   margin-bottom: 0.4rem;
 }
 
+.trending-badge {
+  font-size: 0.8rem;
+  vertical-align: middle;
+}
+
+.btn.active {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+  font-weight: 500;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface2);
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.checkbox-row small {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
 .item-card .card-tags {
   display: flex;
   flex-wrap: wrap;
