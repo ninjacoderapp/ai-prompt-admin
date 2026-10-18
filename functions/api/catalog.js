@@ -1,10 +1,20 @@
 const DROPBOX_API = 'https://api.dropboxapi.com/2';
 const DROPBOX_CONTENT = 'https://content.dropboxapi.com/2';
 
+function normalizePath(value) {
+  if (!value) return '';
+  const parts = String(value).replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length ? '/' + parts.join('/') : '';
+}
+
+function getBasePath(env) {
+  const root = normalizePath(env.DROPBOX_ROOT_PATH || '');
+  const subfolder = normalizePath(env.DROPBOX_SUBFOLDER || '/AI-Prompt-App');
+  return root + subfolder;
+}
+
 function getCatalogPath(env) {
-  const root = env.DROPBOX_ROOT_PATH || '';
-  const subfolder = env.DROPBOX_SUBFOLDER || '/AI-Prompt-App';
-  return root + subfolder + '/catalog.json';
+  return getBasePath(env) + '/catalog.json';
 }
 
 export async function onRequest(context) {
@@ -27,13 +37,23 @@ async function handleGetCatalog(env) {
       headers: { 'Authorization': 'Bearer ' + token, 'Dropbox-API-Arg': JSON.stringify({ path: catalogPath }) },
     });
     if (response.status === 409) {
-      return new Response(JSON.stringify({ categories: ['trending', 'boy', 'girl', 'festival', 'other'], items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      // The catalog file does not exist yet -> first run. Report the exact path
+      // in headers so it is easy to verify the DROPBOX_SUBFOLDER setting.
+      return new Response(JSON.stringify({ categories: ['trending', 'boy', 'girl', 'festival', 'other'], items: [] }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          'X-Catalog-Status': 'not-found',
+          'X-Catalog-Path': catalogPath,
+        },
+      });
     }
     if (!response.ok) {
       const error = await response.text();
       let details = error;
       try { const errJson = JSON.parse(error); details = JSON.stringify(errJson.error || errJson); } catch {}
-      return new Response(JSON.stringify({ error: 'Failed to fetch catalog', details: details, status: response.status }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'Failed to fetch catalog', details: details, status: response.status, catalogPath: catalogPath }), { status: 500, headers: { 'Content-Type': 'application/json' } });
     }
     const text = await response.text();
     try { JSON.parse(text); } catch (parseErr) {

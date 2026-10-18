@@ -1,10 +1,20 @@
 const DROPBOX_API = 'https://api.dropboxapi.com/2';
 const DROPBOX_CONTENT = 'https://content.dropboxapi.com/2';
 
+function normalizePath(value) {
+  if (!value) return '';
+  const parts = String(value).replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts.length ? '/' + parts.join('/') : '';
+}
+
+function getBasePath(env) {
+  const root = normalizePath(env.DROPBOX_ROOT_PATH || '');
+  const subfolder = normalizePath(env.DROPBOX_SUBFOLDER || '/AI-Prompt-App');
+  return root + subfolder;
+}
+
 function getCatalogPath(env) {
-  const root = env.DROPBOX_ROOT_PATH || '';
-  const subfolder = env.DROPBOX_SUBFOLDER || '/AI-Prompt-App';
-  return root + subfolder + '/catalog.json';
+  return getBasePath(env) + '/catalog.json';
 }
 
 export async function onRequest(context) {

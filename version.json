@@ -1,5 +1,5 @@
 {
-  "version": "1.0.2",
-  "updated": "2026-10-18T17:37:00+05:30",
-  "changes": "Fixed images.js to detect upload by content-type instead of query param. Added DROPBOX_SUBFOLDER env var support."
+  "version": "1.0.3",
+  "updated": "2026-10-18T22:20:00+05:30",
+  "changes": "Fixed upload route (/api/images instead of /api/images/upload), added real Dropbox file deletion, added /api/images image proxy fallback, added /api/images diagnostics report, normalized Dropbox paths, and exposed the catalog path when catalog.json is missing."
 }

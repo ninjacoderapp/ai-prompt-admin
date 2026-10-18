@@ -171,7 +171,18 @@ async function loadCatalog() {
         }
 
         catalog = JSON.parse(responseText);
-        dropboxStatus.textContent = '✅ Connected';
+
+        // The catalog endpoint reports when catalog.json was not found so a
+        // wrong DROPBOX_SUBFOLDER is visible instead of a silent empty list.
+        const catalogStatus = res.headers.get('X-Catalog-Status');
+        const catalogPath = res.headers.get('X-Catalog-Path');
+        if (catalogStatus === 'not-found') {
+          dropboxStatus.textContent = '⚠️ No catalog.json at ' + (catalogPath || 'configured path');
+          showToast('catalog.json not found at ' + (catalogPath || 'the configured path') + '. Check DROPBOX_SUBFOLDER.', 'error');
+        } else {
+          dropboxStatus.textContent = '✅ Connected';
+        }
+
         lastSync.textContent = '\uD83D\uDCC5 ' + new Date().toLocaleString();
         updateStats();
         populateFilters();
@@ -273,8 +284,8 @@ function renderItems() {
 
   itemGrid.innerHTML = items.map(item => `
     <div class="item-card ${currentView === 'list' ? 'list-view' : ''}" data-id="${item.id}">
-      <img class="card-image" src="${item.image}" alt="${escapeHtml(item.name)}" loading="lazy"
-        onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22400%22 height=%22300%22><rect fill=%22%231a1a2e%22 width=%22400%22 height=%22300%22/><text x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 fill=%22%2394a3b8%22 font-size=%2214%22>No Image</text></svg>'" />
+      <img class="card-image" src="${escapeHtml(item.image)}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
+        onerror="handleImageError(this)" />
       <div class="card-body">
         <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</div>
         <span class="card-category">${escapeHtml(item.category)}</span>
@@ -313,6 +324,50 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// Derive the Dropbox filename for an item. New items store filePath;
+// older items only have the public URL, so extract the last path segment.
+function getImageFilename(item) {
+  if (!item) return null;
+  if (item.filePath) {
+    const parts = String(item.filePath).split('/').filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : null;
+  }
+  if (!item.image) return null;
+  try {
+    const url = new URL(item.image, window.location.origin);
+    const segment = url.pathname.split('/').filter(Boolean).pop() || '';
+    const name = decodeURIComponent(segment);
+    return /\.(webp|jpe?g|png|avif|gif)$/i.test(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+// Worker-proxied URL - works even when Dropbox hotlinking is blocked.
+function getImageProxyUrl(item) {
+  if (!item) return null;
+  if (item.filePath) return '/api/images?path=' + encodeURIComponent(item.filePath);
+  const filename = getImageFilename(item);
+  return filename ? '/api/images?filename=' + encodeURIComponent(filename) : null;
+}
+
+// First retry through the proxy, then show a placeholder.
+function handleImageError(img) {
+  const proxy = img.dataset.proxy;
+  if (proxy) {
+    img.dataset.proxy = '';
+    img.src = proxy;
+    return;
+  }
+  img.onerror = null;
+  img.src = 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">' +
+    '<rect fill="#1a1a2e" width="400" height="300"/>' +
+    '<text x="50%" y="50%" text-anchor="middle" fill="#94a3b8" font-size="14">No Image</text>' +
+    '</svg>'
+  );
 }
 
 // ===== SEARCH & FILTER =====
@@ -585,7 +640,9 @@ itemForm.addEventListener('submit', async (e) => {
         const formData = new FormData();
         formData.append('image', imageFile.files[0]);
 
-        const uploadRes = await fetch('/api/images/upload', {
+        // Cloudflare Pages maps functions/api/images.js to /api/images.
+        // /api/images/upload does not exist and returns 404.
+        const uploadRes = await fetch('/api/images', {
           method: 'POST',
           body: formData,
         });
@@ -643,6 +700,7 @@ itemForm.addEventListener('submit', async (e) => {
             tags: [...currentTags],
             image: imageUrl,
             prompt,
+            ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
           };
         } else {
       // Add new item
@@ -654,6 +712,7 @@ itemForm.addEventListener('submit', async (e) => {
         tags: [...currentTags],
         image: imageUrl,
         prompt,
+        ...(uploadedFileData && uploadedFileData.path ? { filePath: uploadedFileData.path } : {}),
       });
     }
 
@@ -705,8 +764,9 @@ function confirmDelete(id) {
   const item = catalog.items.find(i => i.id === id);
   if (!item) return;
 
-  confirmTitle.textContent = 'Delete Catalog Entry';
-  confirmMessage.textContent = `Are you sure you want to remove "${item.name}" from the catalog? The image file will NOT be deleted from Dropbox.`;
+  confirmTitle.textContent = 'Delete Image';
+  confirmMessage.textContent = `Delete "${item.name}"? This removes the catalog entry and permanently deletes the image file from Dropbox.`;
+  confirmOkBtn.textContent = 'Delete';
   confirmDialog.style.display = 'flex';
 
   confirmOkBtn.onclick = async () => {
@@ -716,7 +776,39 @@ function confirmDelete(id) {
 }
 
 async function deleteItem(id) {
+  const item = catalog.items.find(i => i.id === id);
+  if (!item) return;
+
   try {
+    // 1. Delete the image file from Dropbox
+    let fileDeleted = false;
+    let fileError = null;
+    const filename = getImageFilename(item);
+
+    if (item.filePath || filename) {
+      try {
+        const fileRes = await fetch('/api/images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'delete',
+            path: item.filePath || undefined,
+            filename: filename || undefined,
+          }),
+        });
+        const fileData = await fileRes.json().catch(() => ({}));
+        if (fileRes.ok) {
+          fileDeleted = true;
+        } else {
+          fileError = fileData.error || ('HTTP ' + fileRes.status);
+          if (fileData.details) fileError += ' - ' + fileData.details;
+        }
+      } catch (err) {
+        fileError = err.message;
+      }
+    }
+
+    // 2. Remove the entry from catalog.json
     const updatedCatalog = JSON.parse(JSON.stringify(catalog));
     updatedCatalog.items = updatedCatalog.items.filter(i => i.id !== id);
 
@@ -735,7 +827,14 @@ async function deleteItem(id) {
     updateStats();
     populateFilters();
     renderItems();
-    showToast('Item removed from catalog. Image file kept in Dropbox.', 'success');
+
+    if (fileError) {
+      showToast('Removed from catalog, but the Dropbox file was NOT deleted: ' + fileError, 'error');
+    } else if (fileDeleted) {
+      showToast('Image deleted from Dropbox and catalog.', 'success');
+    } else {
+      showToast('Removed from catalog (no image file was linked).', 'success');
+    }
   } catch (err) {
     showToast('Error: ' + err.message, 'error');
   }
@@ -823,6 +922,7 @@ function promptRenameCategory(oldName) {
 function confirmDeleteCategory(cat) {
   confirmTitle.textContent = 'Delete Category';
   confirmMessage.textContent = `Delete category "${cat}"?`;
+  confirmOkBtn.textContent = 'Delete';
   confirmDialog.style.display = 'flex';
 
   confirmOkBtn.onclick = async () => {
