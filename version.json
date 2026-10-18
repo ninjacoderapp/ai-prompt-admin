@@ -1,0 +1,5 @@
+{
+  "version": "1.0.1",
+  "updated": "2026-10-18T17:37:00+05:30",
+  "changes": "Fixed images.js to detect upload by content-type instead of query param. Added DROPBOX_SUBFOLDER env var support."
+}
