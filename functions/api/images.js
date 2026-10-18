@@ -3,7 +3,8 @@ const DROPBOX_CONTENT = 'https://content.dropboxapi.com/2';
 
 function getImagesPath(env) {
   const root = env.DROPBOX_ROOT_PATH || '';
-  return root + '/AI-Prompt-App/images';
+  const subfolder = env.DROPBOX_SUBFOLDER || '/AI-Prompt-App';
+  return root + subfolder + '/images';
 }
 
 export async function onRequest(context) {
