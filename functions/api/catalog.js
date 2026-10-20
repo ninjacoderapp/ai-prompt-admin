@@ -108,6 +108,9 @@ function validateCatalog(catalog) {
     const missing = ['id', 'name', 'category', 'image', 'prompt'].filter(f => !(f in item));
     if (missing.length) return 'Item #' + (i + 1) + ' (id ' + item.id + ') is missing: ' + missing.join(', ');
     if (!Array.isArray(item.tags)) return 'Item #' + (i + 1) + ' (id ' + item.id + ') has invalid tags (must be an array)';
+    if (item.nameRequired !== undefined && typeof item.nameRequired !== 'boolean' && item.nameRequired !== 0 && item.nameRequired !== 1) {
+      return 'Item #' + (i + 1) + ' (id ' + item.id + ') has invalid nameRequired (must be true/false or 1/0)';
+    }
   }
   return null;
 }

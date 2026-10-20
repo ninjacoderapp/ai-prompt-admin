@@ -55,6 +55,7 @@ const itemName = $('itemName');
 const itemCategory = $('itemCategory');
 const itemTags = $('itemTags');
 const itemTrending = $('itemTrending');
+const itemNameRequired = $('itemNameRequired');
 const tagsDisplay = $('tagsDisplay');
 const tagSuggestions = $('tagSuggestions');
 const itemPrompt = $('itemPrompt');
@@ -116,6 +117,9 @@ function stripInternal(item) {
   // "prompt2" is not part of the catalog schema and must never be published.
   delete copy.prompt2;
   if (!Array.isArray(copy.tags)) copy.tags = [];
+  // Only publish nameRequired when it is actually set, so old catalogs stay unchanged.
+  if (copy.nameRequired) copy.nameRequired = true;
+  else delete copy.nameRequired;
   return copy;
 }
 
@@ -410,7 +414,7 @@ function renderItems() {
       <img class="card-image" src="${escapeHtml(resolveImageSrc(item))}" data-proxy="${escapeHtml(getImageProxyUrl(item) || '')}" alt="${escapeHtml(item.name)}" loading="lazy"
         onerror="handleImageError(this)" />
       <div class="card-body">
-        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}${pendingBadge(item, baseById)}</div>
+        <div class="card-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}${isTrendingItem(item) ? ' <span class="trending-badge" title="Trending">⭐</span>' : ''}${item.nameRequired ? ' <span class="trending-badge" title="Name required">👤</span>' : ''}${pendingBadge(item, baseById)}</div>
         <span class="card-category">${escapeHtml(item.category)}</span>
         <div class="card-tags">
           ${item.tags.map(t => `<span class="card-tag">${escapeHtml(t)}</span>`).join('')}
@@ -638,6 +642,7 @@ function openAddModal() {
   currentTags = [];
     tagsDisplay.innerHTML = '';
     itemTrending.checked = false;
+    itemNameRequired.checked = false;
     populateCategorySelect();
     itemModal.style.display = 'flex';
   }
@@ -675,6 +680,9 @@ function openEditModal(id) {
     item.tags.forEach(tag => addTagToDisplay(tag));
 
     itemTrending.checked = isTrendingItem(item);
+    itemNameRequired.checked = item.nameRequired === true
+      || item.nameRequired === 1
+      || String(item.nameRequired).toLowerCase() === 'true';
 
     itemModal.style.display = 'flex';
 }
@@ -878,6 +886,7 @@ itemForm.addEventListener('submit', (e) => {
       tags: finalTags,
       image: imageUrl,
       prompt,
+      nameRequired: itemNameRequired.checked,
       dateAdded: prev.dateAdded || new Date().toISOString(),
     };
 
@@ -898,6 +907,7 @@ itemForm.addEventListener('submit', (e) => {
       tags: finalTags,
       image: imageUrl,
       prompt,
+      nameRequired: itemNameRequired.checked,
       dateAdded: new Date().toISOString(),
       ...(pendingImageId ? { _pendingImageId: pendingImageId } : {}),
     });
