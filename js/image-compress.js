@@ -1,19 +1,16 @@
 // Client-side photo optimiser for the admin uploader.
 //
 // Every photo is resized to 450px wide (aspect ratio kept, never cropped and
-// never upscaled) and re-encoded as AVIF. The encoder quality is stepped down
-// until the file fits the size budget, so the result is the best-looking file
-// that still lands under the target. Browsers cannot encode AVIF natively, so
-// the encoder is a libavif/aom build compiled to WebAssembly; if it cannot be
-// loaded the same canvas is re-encoded as WebP instead so an upload never fails.
+// never upscaled) and re-encoded as AVIF at a fixed high quality. Browsers
+// cannot encode AVIF natively, so the encoder is a libavif/aom build compiled
+// to WebAssembly; if it cannot be loaded the same canvas is re-encoded as
+// WebP instead so an upload never fails.
 (function (global) {
   'use strict';
 
   var TARGET_WIDTH = 450;
-  var TARGET_BYTES = 50 * 1024;
-  // Highest quality first: the first rung that fits the budget wins.
-  var QUALITY_LADDER = [68, 58, 48, 40, 32];
-  var WEBP_LADDER = [0.82, 0.72, 0.62, 0.5];
+  var AVIF_QUALITY = 95;
+  var WEBP_QUALITY = 0.82;
   // libavif speed: 0 is the slowest/best quality, 10 the fastest.
   var AVIF_SPEED = 6;
 
@@ -176,99 +173,80 @@
     return avifEncoderPromise;
   }
 
-  // ===== ENCODING WITH A SIZE BUDGET =====
+  // ===== ENCODING =====
 
-  async function encodeAvifWithin(imageData, encode, budget) {
-    var best = null;
-
-    for (var i = 0; i < QUALITY_LADDER.length; i++) {
-      var quality = QUALITY_LADDER[i];
+    async function encodeAvif(imageData, encode) {
       var buffer = await encode(imageData, {
-        quality: quality,
-        qualityAlpha: quality,
+        quality: AVIF_QUALITY,
+        qualityAlpha: AVIF_QUALITY,
         speed: AVIF_SPEED,
-        subsample: 1, // 4:2:0 — far smaller files for a loss nobody sees at this size
+        subsample: 1, // 4:2:0
         denoiseLevel: 0,
       });
-      var blob = new Blob([buffer], { type: 'image/avif' });
-      if (!best || blob.size < best.blob.size) best = { blob: blob, quality: quality };
-      if (blob.size <= budget) return { blob: blob, quality: quality };
+      return { blob: new Blob([buffer], { type: 'image/avif' }), quality: AVIF_QUALITY };
     }
 
-    return best;
-  }
-
-  async function encodeWebpWithin(canvas, budget) {
-    var best = null;
-
-    for (var i = 0; i < WEBP_LADDER.length; i++) {
-      var quality = WEBP_LADDER[i];
-      var blob = await canvasToBlob(canvas, 'image/webp', quality);
-      if (!best || blob.size < best.blob.size) best = { blob: blob, quality: quality };
-      if (blob.size <= budget) return { blob: blob, quality: quality };
+    async function encodeWebp(canvas) {
+      var blob = await canvasToBlob(canvas, 'image/webp', WEBP_QUALITY);
+      return { blob: blob, quality: WEBP_QUALITY };
     }
-
-    return best;
-  }
 
   // ===== PUBLIC API =====
 
   // Resolves to { file, blob, name, width, height, bytes, format, ... } where
   // `file` is ready to drop straight into a FormData upload.
   async function compress(file, options) {
-    options = options || {};
+      options = options || {};
 
-    var maxWidth = options.maxWidth || TARGET_WIDTH;
-    var budget = options.maxBytes || TARGET_BYTES;
+      var maxWidth = options.maxWidth || TARGET_WIDTH;
 
-    var source = await decodeImage(file);
-    var original = sourceSize(source);
-    var target = fitWidth(original.width, original.height, maxWidth);
+      var source = await decodeImage(file);
+      var original = sourceSize(source);
+      var target = fitWidth(original.width, original.height, maxWidth);
 
-    var canvas;
-    try {
-      canvas = drawResized(source, target.width, target.height);
-    } finally {
-      if (typeof source.close === 'function') source.close();
+      var canvas;
+      try {
+        canvas = drawResized(source, target.width, target.height);
+      } finally {
+        if (typeof source.close === 'function') source.close();
+      }
+
+      var imageData = context2d(canvas).getImageData(0, 0, target.width, target.height);
+      var result;
+
+      try {
+        var encode = await getAvifEncoder();
+        result = await encodeAvif(imageData, encode);
+        result.format = 'avif';
+        result.mime = 'image/avif';
+        result.extension = 'avif';
+      } catch (err) {
+        console.warn('[image-compress] AVIF unavailable, falling back to WebP:', err);
+        result = await encodeWebp(canvas);
+        result.format = 'webp';
+        result.mime = 'image/webp';
+        result.extension = 'webp';
+        result.avifError = (err && err.message) || String(err);
+      }
+
+      var name = safeStem(file.name) + '.' + result.extension;
+      var output = new File([result.blob], name, { type: result.mime, lastModified: Date.now() });
+
+      return {
+        file: output,
+        blob: result.blob,
+        name: name,
+        width: target.width,
+        height: target.height,
+        bytes: result.blob.size,
+        quality: result.quality,
+        format: result.format,
+        avifError: result.avifError || null,
+        originalBytes: file.size,
+        originalWidth: original.width,
+        originalHeight: original.height,
+      };
     }
-
-    var imageData = context2d(canvas).getImageData(0, 0, target.width, target.height);
-    var result;
-
-    try {
-      var encode = await getAvifEncoder();
-      result = await encodeAvifWithin(imageData, encode, budget);
-      result.format = 'avif';
-      result.mime = 'image/avif';
-      result.extension = 'avif';
-    } catch (err) {
-      console.warn('[image-compress] AVIF unavailable, falling back to WebP:', err);
-      result = await encodeWebpWithin(canvas, budget);
-      result.format = 'webp';
-      result.mime = 'image/webp';
-      result.extension = 'webp';
-      result.avifError = (err && err.message) || String(err);
-    }
-
-    var name = safeStem(file.name) + '.' + result.extension;
-    var output = new File([result.blob], name, { type: result.mime, lastModified: Date.now() });
-
-    return {
-      file: output,
-      blob: result.blob,
-      name: name,
-      width: target.width,
-      height: target.height,
-      bytes: result.blob.size,
-      quality: result.quality,
-      format: result.format,
-      withinBudget: result.blob.size <= budget,
-      avifError: result.avifError || null,
-      originalBytes: file.size,
-      originalWidth: original.width,
-      originalHeight: original.height,
-    };
-  }
 
   function formatBytes(size) {
     if (size >= 1024 * 1024) return (size / (1024 * 1024)).toFixed(1) + ' MB';
@@ -276,29 +254,25 @@
   }
 
   // One-line summary for the file picker, e.g. "photo.avif · 450×600 · 34 KB".
-  function describe(result) {
-    if (!result) return '';
-    var parts = [
-      result.name,
-      result.width + '\u00D7' + result.height,
-      formatBytes(result.bytes),
-    ];
-    var text = parts.join(' \u00B7 ');
-    if (!result.withinBudget) {
-      text += ' (above the ' + formatBytes(TARGET_BYTES) + ' target)';
+    function describe(result) {
+      if (!result) return '';
+      var parts = [
+        result.name,
+        result.width + '\u00D7' + result.height,
+        formatBytes(result.bytes),
+      ];
+      var text = parts.join(' \u00B7 ');
+      if (result.format !== 'avif') {
+        text += ' \u2014 WebP fallback, AVIF encoder unavailable';
+      }
+      return text;
     }
-    if (result.format !== 'avif') {
-      text += ' \u2014 WebP fallback, AVIF encoder unavailable';
-    }
-    return text;
-  }
 
   global.ImageCompressor = {
-    compress: compress,
-    describe: describe,
-    formatBytes: formatBytes,
-    baseName: baseName,
-    TARGET_WIDTH: TARGET_WIDTH,
-    TARGET_BYTES: TARGET_BYTES,
-  };
+      compress: compress,
+      describe: describe,
+      formatBytes: formatBytes,
+      baseName: baseName,
+      TARGET_WIDTH: TARGET_WIDTH,
+    };
 })(window);
