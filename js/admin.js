@@ -14,6 +14,10 @@ let isCommitting = false;
 let pendingUploads = new Map(); // tempId -> { file, name }
 let pendingDeletes = [];        // [{ id, name, path, filename }]
 let pendingSeq = 0;
+// The optimised result for the file currently picked in the item form. It is
+// what actually gets uploaded, never the raw file the user chose.
+let selectedImage = null;
+let fileSelectToken = 0;
 
 // ===== DOM REFS =====
 const $ = (id) => document.getElementById(id);
@@ -633,6 +637,8 @@ function openAddModal() {
   formSubmitBtn.textContent = 'Add to Pending Changes';
   editItemId.value = '';
   itemForm.reset();
+  fileSelectToken++;
+  selectedImage = null;
   filePreview.style.display = 'none';
   fileDropContent.style.display = 'block';
   formError.style.display = 'none';
@@ -653,6 +659,8 @@ function openEditModal(id) {
 
   // Reset the form first so a file picked earlier in the Add modal does not leak in.
   itemForm.reset();
+  fileSelectToken++;
+  selectedImage = null;
   imageFile.value = '';
 
   modalTitle.textContent = 'Edit Image';
@@ -738,22 +746,44 @@ function handleFileSelect() {
     return;
   }
 
-  // Show preview
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    previewImage.src = e.target.result;
-    const sizeStr = file.size > 1024 * 1024
-      ? (file.size / (1024 * 1024)).toFixed(1) + ' MB'
-      : (file.size / 1024).toFixed(0) + ' KB';
-    fileInfo.textContent = `${file.name} (${sizeStr})`;
-    filePreview.style.display = 'block';
-    fileDropContent.style.display = 'none';
-    formError.style.display = 'none';
-  };
-  reader.readAsDataURL(file);
+  optimisePickedFile(file);
+}
+
+// Resize + re-encode the picked photo before it is ever queued for upload.
+// A token guards against a slow encode finishing after the user picked again.
+async function optimisePickedFile(file) {
+  const token = ++fileSelectToken;
+  selectedImage = null;
+
+  formError.style.display = 'none';
+  filePreview.style.display = 'block';
+  fileDropContent.style.display = 'none';
+  previewImage.removeAttribute('src');
+  fileInfo.textContent = 'Optimising ' + file.name + ' \u2014 resizing to ' +
+    ImageCompressor.TARGET_WIDTH + 'px and compressing\u2026';
+
+  let result;
+  try {
+    result = await ImageCompressor.compress(file);
+  } catch (err) {
+    if (token !== fileSelectToken) return;
+    filePreview.style.display = 'none';
+    fileDropContent.style.display = 'block';
+    imageFile.value = '';
+    showFormError('Could not process that image: ' + err.message);
+    return;
+  }
+
+  if (token !== fileSelectToken) return;
+
+  selectedImage = result;
+  previewImage.src = URL.createObjectURL(result.blob);
+  fileInfo.textContent = ImageCompressor.describe(result);
 }
 
 removeFileBtn.addEventListener('click', () => {
+  fileSelectToken++;
+  selectedImage = null;
   imageFile.value = '';
   filePreview.style.display = 'none';
   fileDropContent.style.display = 'block';
@@ -849,17 +879,21 @@ itemForm.addEventListener('submit', (e) => {
   formError.style.display = 'none';
 
   const existing = editId ? catalog.items.find(i => i.id === editId) : null;
-  const pickedFile = imageFile.files.length > 0 ? imageFile.files[0] : null;
 
   // A newly picked file is queued and uploaded only when the user commits.
   // Until then the card previews it from a local blob URL.
+  if (imageFile.files.length > 0 && !selectedImage) {
+    showFormError('The image is still being optimised. Give it a moment and try again.');
+    return;
+  }
+
   let imageUrl = null;
   let pendingImageId = null;
-  if (pickedFile) {
+  if (selectedImage) {
     if (existing && existing._pendingImageId) pendingUploads.delete(existing._pendingImageId);
     pendingImageId = 'img-' + (++pendingSeq);
-    pendingUploads.set(pendingImageId, { file: pickedFile, name: pickedFile.name });
-    imageUrl = URL.createObjectURL(pickedFile);
+    pendingUploads.set(pendingImageId, { file: selectedImage.file, name: selectedImage.name });
+    imageUrl = URL.createObjectURL(selectedImage.blob);
   } else if (existing) {
     imageUrl = existing.image;
   } else {
@@ -1409,13 +1443,13 @@ function formatBytes(size) {
     : Math.max(1, Math.round(size / 1024)) + ' KB';
 }
 
-function sameFilename(a, b) {
-  return !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase();
+function sameStem(a, b) {
+  return !!a && !!b && ImageCompressor.baseName(a) === ImageCompressor.baseName(b);
 }
 
 function itemsUsingFilename(name) {
   if (!catalog || !Array.isArray(catalog.items)) return 0;
-  return catalog.items.filter(item => sameFilename(getImageFilename(item), name)).length;
+  return catalog.items.filter(item => sameStem(getImageFilename(item), name)).length;
 }
 
 importBtn.addEventListener('click', openImportModal);
@@ -1464,7 +1498,7 @@ function addImportFiles(fileList) {
   Array.from(fileList || []).forEach(file => {
     if (!IMPORT_TYPES.includes(file.type)) { skipped.push(file.name); return; }
     if (file.size > IMPORT_MAX_SIZE) { skipped.push(file.name + ' (too large)'); return; }
-    if (importQueue.some(f => sameFilename(f.name, file.name))) return;
+    if (importQueue.some(f => sameStem(f.name, file.name))) return;
     importQueue.push(file);
   });
   if (skipped.length) showToast('Skipped: ' + skipped.join(', '), 'error');
@@ -1524,12 +1558,17 @@ async function runImport() {
   try {
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      importProgressText.textContent = 'Uploading ' + (i + 1) + ' of ' + files.length + ' — ' + file.name;
+      importProgressText.textContent = 'Optimising ' + (i + 1) + ' of ' + files.length + ' — ' + file.name;
       importProgressFill.style.width = Math.round((i / files.length) * 100) + '%';
 
+      const optimised = await ImageCompressor.compress(file);
+
+      importProgressText.textContent = 'Uploading ' + (i + 1) + ' of ' + files.length +
+        ' — ' + optimised.name + ' (' + ImageCompressor.formatBytes(optimised.bytes) + ')';
+
       const formData = new FormData();
-      formData.append('image', file);
-      const res = await fetch('/api/images?as=' + encodeURIComponent(file.name), { method: 'POST', body: formData });
+      formData.append('image', optimised.file);
+      const res = await fetch('/api/images?as=' + encodeURIComponent(optimised.name), { method: 'POST', body: formData });
       if (!res.ok) throw new Error(await apiErrorMessage(res, 'Upload failed for ' + file.name));
       uploaded.push(await res.json());
     }
@@ -1537,27 +1576,27 @@ async function runImport() {
     importProgressFill.style.width = '100%';
     importProgressText.textContent = 'Linking catalog items...';
 
-    const byName = new Map();
+    const byStem = new Map();
     uploaded.forEach(data => {
-      if (data && data.filename) byName.set(String(data.filename).toLowerCase(), data);
+      if (data && data.filename) byStem.set(ImageCompressor.baseName(data.filename), data);
     });
 
     let linked = 0;
-    const linkedNames = new Set();
+    const linkedStems = new Set();
 
     catalog.items.forEach(item => {
       const name = getImageFilename(item);
       if (!name) return;
-      const hit = byName.get(name.toLowerCase());
+      const hit = byStem.get(ImageCompressor.baseName(name));
       if (!hit || !hit.imageUrl) return;
       if (item.image !== hit.imageUrl) linked++;
       item.image = hit.imageUrl;
       if (hit.path) item.filePath = hit.path;
-      linkedNames.add(name.toLowerCase());
+      linkedStems.add(ImageCompressor.baseName(name));
     });
 
     const unmatched = uploaded
-      .filter(data => data && data.filename && !linkedNames.has(String(data.filename).toLowerCase()))
+      .filter(data => data && data.filename && !linkedStems.has(ImageCompressor.baseName(data.filename)))
       .map(data => data.filename);
 
     updateStats();

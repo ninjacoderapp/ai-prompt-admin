@@ -133,9 +133,9 @@
       <div class="modal-body">
         <p class="import-help">
           Select the original image files (for example <code>1.webp</code>, <code>2.webp</code>…).
-          Each file is uploaded to the repository <code>images/</code> folder under its own name,
-          then every catalog item that points at that filename is re-linked automatically.
-          Press <strong>Commit</strong> afterwards to publish the new links.
+          Each file is resized to 450px wide and re-encoded as AVIF, uploaded to the repository
+          <code>images/</code> folder, then every catalog item that points at that filename stem is
+          re-linked automatically. Press <strong>Commit</strong> afterwards to publish the new links.
         </p>
         <div class="file-drop-zone" id="importDropZone">
           <input type="file" id="importFiles" accept="image/webp,image/jpeg,image/png,image/avif" multiple class="file-input" />
@@ -304,6 +304,7 @@
   <!-- Toast Notification -->
   <div id="toast" class="toast" style="display:none;"></div>
 
+  <script src="js/image-compress.js"></script>
   <script src="js/admin.js"></script>
 </body>
 </html>
