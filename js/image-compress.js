@@ -9,7 +9,7 @@
   'use strict';
 
   var TARGET_WIDTH = 450;
-  var AVIF_QUALITY = 95;
+  var AVIF_QUALITY = 85;
   var WEBP_QUALITY = 0.82;
   // libavif speed: 0 is the slowest/best quality, 10 the fastest.
   var AVIF_SPEED = 6;
