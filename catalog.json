@@ -383,6 +383,7 @@
         "id":  25,
         "name":  "Crimson Cinematic Portrait",
         "category":  "male",
+        "nameRequired" : true,
         "tags":  [
           "cinematic",
           "double-exposure",
